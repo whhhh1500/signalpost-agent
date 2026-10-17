@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+brreg-enheter.csv
+signalpost-universe.jsonl.gz
+_dl_done
+out/*
+!out/smoke100-report.json
+!out/smoke100-envelopes.jsonl
+!out/smoke100-profiles.jsonl
+disc40.jsonl
+smoke20.jsonl
+.pytest_cache/
