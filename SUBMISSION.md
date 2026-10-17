@@ -39,3 +39,21 @@ websites, fetched politely with rate limits. Expected cost per official batch: U
 
 Note: `SIGNALPOST_ALLOW_FAKE_IP_DNS=1` is a local-only switch for sandboxes whose DNS
 returns 198.18.0.0/15 proxy addresses; it is off by default and not needed for evaluation.
+
+## Revision: NAV jobs + Brreg kunngjøringer (2026-10-17)
+- `src/norway_company_agent/nav_jobs.py`: light fail-soft matcher. Searches
+  `arbeidsplassen.nav.no/stillinger/api/search` by legal name, then verifies each
+  candidate via the public NAV feed entry (`pam-stilling-feed.nav.no`) so only
+  ACTIVE ads with exact `employer.orgnr` are published. Finn-only ads (404 on the
+  feed) are skipped, never published on name match alone. Uses the rotating public
+  Bearer token from `/api/publicToken` (no spend).
+- `src/norway_company_agent/brreg_announcements.py`: fetches the public Brreg
+  kunngjøring HTML list by orgnr (`w2.brreg.no/kunngjoring/hent_nr.jsp`). No open
+  JSON kunngjøringer API exists; paid XML SFTP is out of scope. Parses date/type/URL
+  with response sha256.
+- Wired into `scripts/run_competition_batch.py` as modules `nav_jobs` and
+  `brreg_announcements` (default on; `--no-nav-jobs` / `--no-brreg-announcements`).
+- Smoke20 (`smoke20.jsonl`, `--no-discover-websites`, 2 workers): 20/20 envelopes,
+  validation passed, 144 requests, ~74s. Brreg announcements available for 20/20
+  (435 rows). NAV jobs not_found for all 20 (holding-heavy sample); live check on
+  Que Pasa AS `927212021` returned 2 ACTIVE orgnr-verified ads.
