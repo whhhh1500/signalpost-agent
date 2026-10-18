@@ -5,7 +5,8 @@ Light, fail-soft path:
 1. Search the public stillinger API by legal name (cheap candidate shortlist).
 2. For each candidate UUID, fetch the authenticated public feed entry
    (https://pam-stilling-feed.nav.no) which carries employer.orgnr.
-3. Keep only ACTIVE ads whose employer.orgnr exactly equals this company.
+3. Keep only ACTIVE ads whose employer.orgnr exactly equals this company or
+   one of its Brreg-registered sub-units (underenheter from the locations module).
 
 Ads present only on Finn.no are excluded from the feed and therefore cannot be
 orgnr-verified here; those candidates are skipped rather than published on name
@@ -167,13 +168,37 @@ def fetch_feed_entry(uuid: str, token: str) -> FetchResult:
     )
 
 
-def jobs_from_entry(body: Any, org: str) -> list[dict[str, Any]]:
+def registered_subunits(profile: dict[str, Any]) -> set[str]:
+    """Sub-unit (underenhet) orgnrs already fetched from Brreg for this company.
+
+    NAV ads usually name the employer by its sub-unit number, not the legal
+    entity. The locations module reads Brreg underenheter filtered by
+    overordnetEnhet, so these numbers are officially tied to the company and
+    cost no extra requests.
+    """
+    record = (profile.get("evidence") or {}).get("locations") or {}
+    if record.get("status") != "available":
+        return set()
+    units = ((record.get("value") or {}).get("locations")) or []
+    out: set[str] = set()
+    for unit in units:
+        num = re.sub(r"\D", "", str((unit or {}).get("organisation_number") or ""))
+        if len(num) == 9:
+            out.add(num)
+    return out
+
+
+def jobs_from_entry(body: Any, org: str, subunits: set[str] | frozenset[str] = frozenset()) -> list[dict[str, Any]]:
     if not isinstance(body, dict) or body.get("status") != "ACTIVE":
         return []
     content = body.get("ad_content") or body.get("json") or {}
     employer = content.get("employer") or {}
     orgnr = re.sub(r"\D", "", str(employer.get("orgnr") or ""))
-    if orgnr != org:
+    if orgnr == org:
+        relation = "legal_entity"
+    elif orgnr in subunits:
+        relation = "registered_subunit"
+    else:
         return []
     link = content.get("link") or f"https://arbeidsplassen.nav.no/stillinger/stilling/{content.get('uuid') or body.get('uuid')}"
     return [
@@ -184,6 +209,7 @@ def jobs_from_entry(body: Any, org: str) -> list[dict[str, Any]]:
             "expires": content.get("expires"),
             "employer_name": employer.get("name"),
             "employer_orgnr": orgnr,
+            "employer_relation": relation,
             "employer_homepage": employer.get("homepage"),
             "link": link,
             "municipal": ((content.get("workLocations") or [{}])[0] or {}).get("municipal"),
@@ -255,6 +281,7 @@ def fetch_nav_jobs(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
         or names_compatible(name, item.get("business_name") or "")
     ][:MAX_DETAIL_FETCHES]
 
+    subunits = registered_subunits(profile)
     matched: list[dict[str, Any]] = []
     hashes: list[str] = []
     skipped_unverifiable = 0
@@ -268,7 +295,7 @@ def fetch_nav_jobs(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
             continue
         if entry.status != 200:
             continue
-        matched.extend(jobs_from_entry(entry.body, org))
+        matched.extend(jobs_from_entry(entry.body, org, subunits))
 
     # Dedupe by uuid
     seen: set[str] = set()
@@ -285,7 +312,8 @@ def fetch_nav_jobs(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
         "job_count": len(unique),
         "candidates_considered": len(compatible),
         "skipped_unverifiable_feed_entries": skipped_unverifiable,
-        "match_rule": "exact_employer_orgnr_on_active_feed_entry",
+        "match_rule": "exact_employer_orgnr_on_active_feed_entry (legal entity or Brreg-registered sub-unit)",
+        "subunits_checked": len(subunits),
     }
     if unique:
         return (
@@ -298,7 +326,7 @@ def fetch_nav_jobs(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
                 content_sha256=combined_hash,
                 retrieved_at=search_result.retrieved_at,
                 source_row_key=org,
-                note=f"{len(unique)} active ad(s) with employer.orgnr={org}",
+                note=f"{len(unique)} active ad(s) with employer.orgnr={org} or one of its registered sub-units",
             ),
             metrics,
         )

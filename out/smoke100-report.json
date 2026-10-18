@@ -1,7 +1,7 @@
 {
-  "run_id": "smoke100-001",
-  "started_at": "2026-10-17T01:30:51.578121Z",
-  "completed_at": "2026-10-17T01:34:57.598007Z",
+  "run_id": "smoke100-rev-20261018",
+  "started_at": "2026-10-18T02:12:56.864629Z",
+  "completed_at": "2026-10-18T02:17:57.766644Z",
   "expected_count": 100,
   "emitted_envelopes": 100,
   "resumed_profiles": 0,
@@ -14,7 +14,9 @@
     "roles",
     "group",
     "locations",
-    "website"
+    "website",
+    "nav_jobs",
+    "brreg_announcements"
   ],
   "registry": {
     "registry_snapshot_sha256": "3c893221798722bab5ba19ede17cff395cc790b0d18a097d66c1e29e082532ad",
@@ -23,10 +25,10 @@
     "selected": 100
   },
   "operations": {
-    "requests": 1122,
-    "bytes": 27689810,
-    "p50_ms": 547,
-    "p95_ms": 1815
+    "requests": 1314,
+    "bytes": 30330883,
+    "p50_ms": 556,
+    "p95_ms": 1532
   },
   "validation": {
     "passed": true,

@@ -57,3 +57,19 @@ returns 198.18.0.0/15 proxy addresses; it is off by default and not needed for e
   validation passed, 144 requests, ~74s. Brreg announcements available for 20/20
   (435 rows). NAV jobs not_found for all 20 (holding-heavy sample); live check on
   Que Pasa AS `927212021` returned 2 ACTIVE orgnr-verified ads.
+
+## Revision: NAV sub-unit matching + test path fix (2026-10-18)
+- `nav_jobs.py`: NAV ads usually name the employer by its *sub-unit* (underenhet)
+  number, not the legal entity, so exact legal-entity matching found almost nothing.
+  Ads are now also accepted when `employer.orgnr` is one of the company's sub-units
+  already returned by the Brreg `underenheter?overordnetEnhet=<orgnr>` call in the
+  `locations` module (no extra requests). Each job carries
+  `employer_relation = legal_entity | registered_subunit`; anything else is still rejected.
+- On 40 random companies with 20+ employees: 0/40 → 3/40 with verified active ads
+  (6 ads, all hand-checked correct: ColliCare Logistics, Leirvik, Norges arktiske
+  studentsamskipnad).
+- `tests/conftest.py` puts `src/` on the path so `uv run --with pytest pytest -q`
+  collects every test file cleanly: 116 passed, 5 subtests passed.
+- 100-company smoke test re-run with all modules on (`out/smoke100-*`, run id
+  `smoke100-rev-20261018`, same default-seed batch): 100/100 terminal envelopes,
+  validation passed, 1,314 requests, ~5 minutes with 4 workers, p95 1.5 s.
