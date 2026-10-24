@@ -188,7 +188,61 @@ def registered_subunits(profile: dict[str, Any]) -> set[str]:
     return out
 
 
-def jobs_from_entry(body: Any, org: str, subunits: set[str] | frozenset[str] = frozenset()) -> list[dict[str, Any]]:
+AGGREGATE_TITLE = re.compile(
+    r"\b(flere|ulike|diverse|mange|nye)\s+(ledige\s+)?stillinger\b|\bledige\s+stillinger\b|"
+    r"\b(talentbank|talent\s*pool|åpen\s+søknad|apen\s+soknad|generell\s+søknad|open\s+application|"
+    r"multiple\s+positions|several\s+positions|various\s+positions|sommerjobb(er)?\s+\d{4}\s*-\s*flere)\b",
+    re.I,
+)
+
+
+def _parse_dt(value: Any) -> "datetime | None":
+    from datetime import datetime, timezone
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = datetime.strptime(text[:10], "%Y-%m-%d")
+        except ValueError:
+            return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def single_current_ad_check(content: dict[str, Any], now: "datetime | None" = None) -> str | None:
+    """Audit item 3: return a rejection reason, or None if this is ONE current ad of its own.
+
+    Rules: the feed status must be ACTIVE (checked by caller); `expires` (or `applicationDue`
+    when it is a date) must be present and not in the past; `positioncount` must be 1 or
+    absent; the title must not be an aggregate/multi-role/talent-pool posting.
+    """
+    from datetime import datetime, timezone
+
+    now = now or datetime.now(timezone.utc)
+    expires = _parse_dt(content.get("expires"))
+    due = _parse_dt(content.get("applicationDue"))
+    deadline = expires or due
+    if deadline is None:
+        return "no expiry/application deadline: cannot prove the ad is current"
+    if deadline.date() < now.date():
+        return f"ad expired {deadline.date().isoformat()}"
+    if due is not None and due.date() < now.date():
+        return f"application deadline passed {due.date().isoformat()}"
+    count = str(content.get("positioncount") or "1").strip()
+    if not count.isdigit() or int(count) != 1:
+        return f"ad bundles several positions (positioncount={count})"
+    title = " ".join(str(content.get("title") or content.get("jobtitle") or "").split())
+    if not title:
+        return "ad has no title"
+    if AGGREGATE_TITLE.search(title) or re.search(r"\s/\s|;|\bog/eller\b", title) and len(title) > 60:
+        return "title indicates an aggregate or multi-role posting"
+    return None
+
+
+def jobs_from_entry(body: Any, org: str, subunits: set[str] | frozenset[str] = frozenset(), now: Any = None, rejected: list | None = None) -> list[dict[str, Any]]:
     if not isinstance(body, dict) or body.get("status") != "ACTIVE":
         return []
     content = body.get("ad_content") or body.get("json") or {}
@@ -200,18 +254,28 @@ def jobs_from_entry(body: Any, org: str, subunits: set[str] | frozenset[str] = f
         relation = "registered_subunit"
     else:
         return []
-    link = content.get("link") or f"https://arbeidsplassen.nav.no/stillinger/stilling/{content.get('uuid') or body.get('uuid')}"
+    reason = single_current_ad_check(content, now)
+    if reason:
+        if rejected is not None:
+            rejected.append({"uuid": content.get("uuid") or body.get("uuid"), "title": content.get("title"), "reason": reason})
+        return []
+    uuid = content.get("uuid") or body.get("uuid")
+    # Always publish the canonical single-ad NAV page, never a list/search page.
+    link = f"https://arbeidsplassen.nav.no/stillinger/stilling/{uuid}"
     return [
         {
-            "uuid": content.get("uuid") or body.get("uuid"),
-            "title": content.get("title") or content.get("jobtitle"),
+            "uuid": uuid,
+            "title": " ".join(str(content.get("title") or content.get("jobtitle") or "").split()),
             "published": content.get("published"),
             "expires": content.get("expires"),
+            "application_due": content.get("applicationDue"),
+            "positioncount": content.get("positioncount"),
             "employer_name": employer.get("name"),
             "employer_orgnr": orgnr,
             "employer_relation": relation,
             "employer_homepage": employer.get("homepage"),
             "link": link,
+            "original_source_url": content.get("sourceurl") or content.get("link"),
             "municipal": ((content.get("workLocations") or [{}])[0] or {}).get("municipal"),
             "engagementtype": content.get("engagementtype"),
             "extent": content.get("extent"),
@@ -285,6 +349,7 @@ def fetch_nav_jobs(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
     matched: list[dict[str, Any]] = []
     hashes: list[str] = []
     skipped_unverifiable = 0
+    rejected_ads: list[dict[str, Any]] = []
     for item in compatible:
         entry = fetch_feed_entry(item["uuid"], token)
         _add(entry)
@@ -295,7 +360,7 @@ def fetch_nav_jobs(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
             continue
         if entry.status != 200:
             continue
-        matched.extend(jobs_from_entry(entry.body, org, subunits))
+        matched.extend(jobs_from_entry(entry.body, org, subunits, rejected=rejected_ads))
 
     # Dedupe by uuid
     seen: set[str] = set()
@@ -314,6 +379,8 @@ def fetch_nav_jobs(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
         "skipped_unverifiable_feed_entries": skipped_unverifiable,
         "match_rule": "exact_employer_orgnr_on_active_feed_entry (legal entity or Brreg-registered sub-unit)",
         "subunits_checked": len(subunits),
+        "rejected_own_ads": rejected_ads,
+        "ad_rule": "single current ad: ACTIVE, not expired, positioncount=1, non-aggregate title, canonical NAV ad URL",
     }
     if unique:
         return (

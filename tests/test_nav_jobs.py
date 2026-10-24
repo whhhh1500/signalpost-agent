@@ -19,6 +19,7 @@ def test_jobs_from_entry_requires_exact_orgnr_and_active():
             "uuid": "abc",
             "title": "Kokk",
             "published": "2026-10-17T00:00:00+02:00",
+            "expires": "2099-01-01T00:00:00+01:00",
             "link": "https://arbeidsplassen.nav.no/stillinger/stilling/abc",
             "employer": {"name": "Que Pasa AS", "orgnr": "927212021"},
             "workLocations": [{"municipal": "HAMAR"}],
@@ -33,7 +34,7 @@ def test_jobs_from_entry_requires_exact_orgnr_and_active():
 
 
 def _entry(orgnr):
-    return {"status": "ACTIVE", "ad_content": {"uuid": "u1", "title": "Kokk", "employer": {"name": "X", "orgnr": orgnr}}}
+    return {"status": "ACTIVE", "ad_content": {"uuid": "u1", "title": "Kokk", "expires": "2099-01-01", "employer": {"name": "X", "orgnr": orgnr}}}
 
 
 def test_subunit_orgnr_is_accepted_and_labelled():
@@ -53,3 +54,25 @@ def test_registered_subunits_reads_locations_evidence():
     profile = {"evidence": {"locations": {"status": "available", "value": {"locations": [{"organisation_number": "973246534"}, {"organisation_number": None}]}}}}
     assert registered_subunits(profile) == {"973246534"}
     assert registered_subunits({"evidence": {}}) == set()
+
+
+def _own(**extra):
+    content = {"uuid": "u2", "title": "Kokk", "expires": "2099-01-01", "employer": {"name": "X", "orgnr": "985589003"}}
+    content.update(extra)
+    return {"status": "ACTIVE", "ad_content": content}
+
+
+def test_expired_or_undated_ads_are_rejected():
+    rejected = []
+    assert jobs_from_entry(_own(expires="2020-01-01"), "985589003", rejected=rejected) == []
+    assert "expired" in rejected[0]["reason"]
+    assert jobs_from_entry(_own(expires=None), "985589003") == []
+    assert jobs_from_entry(_own(applicationDue="2020-01-01"), "985589003") == []
+
+
+def test_multi_position_and_aggregate_ads_are_rejected():
+    assert jobs_from_entry(_own(positioncount="3"), "985589003") == []
+    assert jobs_from_entry(_own(title="Flere ledige stillinger i butikk"), "985589003") == []
+    assert jobs_from_entry(_own(title="Åpen søknad"), "985589003") == []
+    ok = jobs_from_entry(_own(positioncount="1", link="https://example.no/jobs"), "985589003")
+    assert ok and ok[0]["link"] == "https://arbeidsplassen.nav.no/stillinger/stilling/u2"

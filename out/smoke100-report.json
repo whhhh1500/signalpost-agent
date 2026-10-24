@@ -1,7 +1,7 @@
 {
-  "run_id": "smoke100-rev-20261018",
-  "started_at": "2026-10-18T02:12:56.864629Z",
-  "completed_at": "2026-10-18T02:17:57.766644Z",
+  "run_id": "smoke100-audit-20261024",
+  "started_at": "2026-10-24T02:37:05.379847Z",
+  "completed_at": "2026-10-24T02:41:41.753082Z",
   "expected_count": 100,
   "emitted_envelopes": 100,
   "resumed_profiles": 0,
@@ -25,10 +25,10 @@
     "selected": 100
   },
   "operations": {
-    "requests": 1314,
-    "bytes": 30330883,
-    "p50_ms": 556,
-    "p95_ms": 1532
+    "requests": 1320,
+    "bytes": 31026604,
+    "p50_ms": 553,
+    "p95_ms": 1453
   },
   "validation": {
     "passed": true,

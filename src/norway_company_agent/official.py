@@ -71,16 +71,51 @@ def _get(value: Any, *path: str) -> Any:
     return value
 
 
-def normalize_financials(body: Any) -> dict[str, Any]:
+def _period_months(period: Any) -> int | None:
+    """Whole months covered by a Brreg regnskapsperiode {fraDato, tilDato}; None if unknown."""
+    from datetime import date
+
+    if not isinstance(period, dict):
+        return None
+    try:
+        start = date.fromisoformat(str(period.get("fraDato"))[:10])
+        end = date.fromisoformat(str(period.get("tilDato"))[:10])
+    except ValueError:
+        return None
+    if end < start:
+        return None
+    months = (end.year - start.year) * 12 + (end.month - start.month) + (1 if end.day >= start.day - 1 else 0)
+    return max(months, 0)
+
+
+COMPARABLE_FIELDS = ("revenue", "operating_result", "profit_before_tax", "annual_result", "assets", "equity", "debt")
+
+
+def normalize_financials(body: Any, expected_latest_year: Any = None) -> dict[str, Any]:
+    """Audit item 4.
+
+    * `latest` is the company's OWN (SELSKAP) account with the most recent period end
+      (tilDato); KONSERN (group) accounts are only used when no SELSKAP account exists.
+      Brreg returns records oldest-first, so position in the list is never used.
+    * If the registry says a newer year was filed (sisteInnsendteAarsregnskap) than the
+      newest normalized record, `latest_is_current` is False and the gap is reported.
+    * `comparison` only pairs the latest record with the immediately preceding record of
+      the same account type AND the same period length in months; otherwise it is null
+      with a reason (e.g. a 9-month short year is never compared with 12 months).
+    """
     records = body if isinstance(body, list) else []
     if not records:
-        return {"records": []}
+        return {"records": [], "latest": None, "comparison": None}
     normalized = []
-    for item in records[:3]:
+    for item in records:
+        period = item.get("regnskapsperiode") or {}
         normalized.append({
             "record_id": item.get("id"),
             "account_type": item.get("regnskapstype"),
-            "period": item.get("regnskapsperiode"),
+            "period": period,
+            "period_end": str(period.get("tilDato") or "")[:10] or None,
+            "fiscal_year": (str(period.get("tilDato") or "")[:4] or None),
+            "period_months": _period_months(period),
             "currency": item.get("valuta"),
             "revenue": _get(item, "resultatregnskapResultat", "driftsresultat", "driftsinntekter", "sumDriftsinntekter"),
             "operating_result": _get(item, "resultatregnskapResultat", "driftsresultat", "driftsresultat"),
@@ -90,7 +125,49 @@ def normalize_financials(body: Any) -> dict[str, Any]:
             "equity": _get(item, "egenkapitalGjeld", "egenkapital", "sumEgenkapital"),
             "debt": _get(item, "egenkapitalGjeld", "gjeldOversikt", "sumGjeld"),
         })
-    return {"records": normalized}
+    own = [r for r in normalized if str(r.get("account_type") or "").upper() != "KONSERN"]
+    pool = own or normalized
+    pool = sorted(pool, key=lambda r: r.get("period_end") or "", reverse=True)
+    others = [r for r in normalized if r not in pool]
+    ordered = pool + sorted(others, key=lambda r: r.get("period_end") or "", reverse=True)
+    latest = pool[0]
+    result: dict[str, Any] = {
+        "records": ordered[:6],
+        "latest": latest,
+        "latest_rule": "own (SELSKAP) account with the most recent period end; KONSERN only as fallback",
+    }
+    expected = str(expected_latest_year or "").strip()
+    if expected.isdigit() and latest.get("fiscal_year"):
+        result["registry_latest_submitted_year"] = expected
+        result["latest_is_current"] = latest["fiscal_year"] >= expected
+        if not result["latest_is_current"]:
+            result["latest_gap_note"] = f"registry lists FY{expected} as filed but only FY{latest['fiscal_year']} figures were returned"
+    previous = next((r for r in pool[1:] if (r.get("period_end") or "") < (latest.get("period_end") or "")), None)
+    if previous is None:
+        result["comparison"] = None
+        result["comparison_note"] = "no earlier period of the same account type"
+    elif not latest.get("period_months") or latest.get("period_months") != previous.get("period_months"):
+        result["comparison"] = None
+        result["comparison_note"] = (
+            f"periods have different or unknown lengths ({latest.get('period_months')} vs {previous.get('period_months')} months); not compared"
+        )
+    elif latest.get("currency") != previous.get("currency"):
+        result["comparison"] = None
+        result["comparison_note"] = "different currencies; not compared"
+    else:
+        deltas = {}
+        for key in COMPARABLE_FIELDS:
+            a, b = latest.get(key), previous.get(key)
+            if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+                deltas[key] = {"latest": a, "previous": b, "change": a - b, "change_pct": round((a - b) / abs(b) * 100, 1) if b else None}
+        result["comparison"] = {
+            "latest_period_end": latest.get("period_end"),
+            "previous_period_end": previous.get("period_end"),
+            "period_months": latest.get("period_months"),
+            "account_type": latest.get("account_type"),
+            "deltas": deltas,
+        }
+    return result
 
 
 def normalize_financial_history(body: Any, org: str) -> dict[str, Any]:
@@ -178,7 +255,7 @@ def _classified(field: str, source_type: str, result: FetchResult, value: Any = 
     return evidence(field, "source_error", source_type, result.url, note=result.error, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
 
 
-def fetch_official_modules(org: str, modules: set[str], fetcher: Callable[[str], FetchResult] = fetch_json) -> tuple[dict[str, Any], list[FetchResult]]:
+def fetch_official_modules(org: str, modules: set[str], fetcher: Callable[[str], FetchResult] = fetch_json, expected_latest_year: Any = None) -> tuple[dict[str, Any], list[FetchResult]]:
     records: dict[str, Any] = {}
     metrics: list[FetchResult] = []
     endpoints = {
@@ -196,6 +273,6 @@ def fetch_official_modules(org: str, modules: set[str], fetcher: Callable[[str],
         metrics.append(result)
         normalized = None
         if result.status == 200:
-            normalized = normalize_entity(result.body) if module == "registry_live" else normalize_financials(result.body) if module == "financials" else normalize_financial_history(result.body, org) if module == "financial_history" else normalize_roles(result.body) if module == "roles" else normalize_locations(result.body) if module == "locations" else result.body
+            normalized = normalize_entity(result.body) if module == "registry_live" else normalize_financials(result.body, expected_latest_year) if module == "financials" else normalize_financial_history(result.body, org) if module == "financial_history" else normalize_roles(result.body) if module == "roles" else normalize_locations(result.body) if module == "locations" else result.body
         records[module] = _classified(module, source_type, result, value=normalized)
     return records, metrics

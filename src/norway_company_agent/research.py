@@ -39,9 +39,12 @@ def answer_profile(row: dict[str, Any], question: str) -> dict[str, Any]:
 
     financial = evidence.get("financials", {})
     if all_topics or any(term in q for term in financial_terms):
-        records = (financial.get("value") or {}).get("records") or []
-        if records:
-            latest = records[0]
+        fin_value = financial.get("value") or {}
+        records = fin_value.get("records") or []
+        latest = fin_value.get("latest") or (max(records, key=lambda r: str((r.get("period") or {}).get("tilDato") or "")) if records else None)
+        if fin_value.get("latest_is_current") is False:
+            unsupported.append(fin_value.get("latest_gap_note") or "Latest filed accounts not yet available in structured form.")
+        if latest:
             for label, key in (
                 ("Reporting period", "period"),
                 ("Revenue", "revenue"),

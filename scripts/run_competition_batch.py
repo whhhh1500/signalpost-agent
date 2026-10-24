@@ -63,7 +63,7 @@ def main() -> None:
     operations = {"requests": 0, "bytes": 0, "latencies_ms": []}
 
     def enrich(profile: dict) -> tuple[dict, dict]:
-        records, metrics = fetch_official_modules(profile["organisation_number"], fetch_modules)
+        records, metrics = fetch_official_modules(profile["organisation_number"], fetch_modules, expected_latest_year=profile.get("latest_submitted_accounts"))
         profile["evidence"].update(records)
         website_metrics = {"requests": 0, "bytes": 0, "latencies_ms": []}
         if "website" in requested_modules:

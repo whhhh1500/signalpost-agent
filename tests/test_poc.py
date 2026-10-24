@@ -1064,6 +1064,29 @@ class OfficialNormalizationTests(unittest.TestCase):
         self.assertEqual(record["operating_result"], 0)
         self.assertEqual(record["currency"], "NOK")
 
+    def test_latest_accounts_use_newest_own_period_not_list_order(self):
+        def rec(kind, start, end, revenue):
+            return {"regnskapstype": kind, "valuta": "NOK", "regnskapsperiode": {"fraDato": start, "tilDato": end},
+                    "resultatregnskapResultat": {"driftsresultat": {"driftsinntekter": {"sumDriftsinntekter": revenue}}}}
+        body = [rec("KONSERN", "2023-01-01", "2023-12-31", 1), rec("KONSERN", "2025-01-01", "2025-12-31", 2),
+                rec("SELSKAP", "2023-01-01", "2023-12-31", 3), rec("SELSKAP", "2024-01-01", "2024-12-31", 100),
+                rec("SELSKAP", "2025-01-01", "2025-12-31", 110)]
+        value = normalize_financials(body, "2025")
+        self.assertEqual(value["latest"]["fiscal_year"], "2025")
+        self.assertEqual(value["latest"]["account_type"], "SELSKAP")
+        self.assertTrue(value["latest_is_current"])
+        self.assertEqual(value["comparison"]["deltas"]["revenue"]["change"], 10)
+        self.assertEqual(value["comparison"]["period_months"], 12)
+
+    def test_comparison_refuses_unequal_period_lengths_and_flags_stale_latest(self):
+        body = [{"regnskapstype": "SELSKAP", "regnskapsperiode": {"fraDato": "2024-04-01", "tilDato": "2024-12-31"}},
+                {"regnskapstype": "SELSKAP", "regnskapsperiode": {"fraDato": "2023-01-01", "tilDato": "2023-12-31"}}]
+        value = normalize_financials(body, "2025")
+        self.assertEqual(value["latest"]["period_months"], 9)
+        self.assertIsNone(value["comparison"])
+        self.assertIn("different", value["comparison_note"])
+        self.assertFalse(value["latest_is_current"])
+
     def test_financial_history_is_sorted_and_links_to_official_pdfs(self):
         record = normalize_financial_history(["2024", "2022", "2024", "invalid"], "923609016")
         self.assertEqual(record["years"], ["2022", "2024"])
