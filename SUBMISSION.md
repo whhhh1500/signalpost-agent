@@ -73,3 +73,9 @@ returns 198.18.0.0/15 proxy addresses; it is off by default and not needed for e
 - 100-company smoke test re-run with all modules on (`out/smoke100-*`, run id
   `smoke100-rev-20261018`, same default-seed batch): 100/100 terminal envelopes,
   validation passed, 1,314 requests, ~5 minutes with 4 workers, p95 1.5 s.
+
+## 2026-10-24 hardening
+
+- **Jobs validated on real NAV ads**: 45 Norwegian employers with live ads (8 to 8,000+ employees; municipalities, hospitals, staffing, retail, small cafés). 62 ads published: all live-checked ACTIVE, positioncount=1, and employer orgnr confirmed in Brreg as the company or its underenhet. All 43 rejected ads were justified (multi-position, recruitment pool/tilkallingsvikarer incl. nynorsk, or deadline passed). Locked in as `tests/fixtures/nav_real_ads_2026-10-24.json` + `tests/test_nav_real_ads.py`. Search now drops the legal suffix and falls back to short name queries; the crude slash rule (which rejected "Servicetekniker / montør") was replaced by head-count and pool-word rules; identical re-posts are collapsed.
+- **Website side evidence** for sites that never print org.nr: the `.no` domain must be the full legal-name core, the page must name the exact legal entity (or the Brreg e-mail domain matches), and the page must name no other legal entity (other org.nr, JSON-LD legalName, "© Other AS"). Homepage fetch gets one slower retry. 100-company smoke rerun: publishable websites 6 -> 7 (only BRANDMAKER AS, brandmaker.no, added); no other change.
+- Full suite: 241 passed, 5 subtests passed.

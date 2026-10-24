@@ -76,3 +76,12 @@ def test_multi_position_and_aggregate_ads_are_rejected():
     assert jobs_from_entry(_own(title="Åpen søknad"), "985589003") == []
     ok = jobs_from_entry(_own(positioncount="1", link="https://example.no/jobs"), "985589003")
     assert ok and ok[0]["link"] == "https://arbeidsplassen.nav.no/stillinger/stilling/u2"
+
+
+def test_headcount_and_pool_titles_are_rejected_but_single_roles_pass():
+    for bad in ["2 faste 100%-stillinger som fagarbeider", "Træleborg omsorgsbolig søker tilkallingsvikarer!",
+                "Tilkallingsvikarar/helgestillingar ved sjukeheimane", "Nattevakter – 3 midlertidige stillinger"]:
+        assert jobs_from_entry(_own(title=bad), "985589003") == [], bad
+    for ok in ["Servicetekniker / montør – industriporter og automatikk", "Tilkallingsvikar til Musti Molde!",
+               "Sykepleier / Vernepleier", "Renholder - 60% fast stilling"]:
+        assert jobs_from_entry(_own(title=ok), "985589003"), ok

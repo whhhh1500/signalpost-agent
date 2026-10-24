@@ -48,7 +48,7 @@ def _utc_now() -> str:
 
 def normalize_name(name: str) -> str:
     text = SUFFIX.sub(" ", name or "")
-    text = re.sub(r"[^0-9a-zæøå]+", " ", text.casefold())
+    text = re.sub(r"[\W_]+", " ", text.casefold())
     return " ".join(text.split())
 
 
@@ -63,6 +63,38 @@ def names_compatible(company: str, employer: str) -> bool:
     a_tokens = [t for t in a.split() if len(t) > 2]
     b_tokens = set(b.split())
     return bool(a_tokens) and all(t in b_tokens for t in a_tokens[:3])
+
+
+GENERIC_QUERY_TOKENS = {
+    "kommune", "fylkeskommune", "hotel", "hotell", "norge", "norway", "bygg", "service", "services",
+    "holding", "eiendom", "invest", "drift", "gruppen", "group", "senter", "barnehage", "sokn",
+    "helse", "og", "the", "sektor", "avdeling",
+}
+
+
+def search_queries(name: str) -> list[str]:
+    """NAV search is AND-like over businessName/title text, so legal suffixes ("AS") and
+    long organisational-unit names return zero hits. Try the suffix-free name first, then its
+    first two tokens, then a single distinctive first token. Recall only: every candidate
+    is still verified by exact employer.orgnr before anything is published."""
+    tokens = normalize_name(name).split()
+    out: list[str] = []
+    if tokens:
+        out.append(" ".join(tokens))
+    if len(tokens) > 2:
+        out.append(" ".join(tokens[:2]))
+    if len(tokens) >= 2 and len(tokens[0]) >= 4 and tokens[0] not in GENERIC_QUERY_TOKENS:
+        out.append(tokens[0])
+    seen: list[str] = []
+    for q in out:
+        if q not in seen:
+            seen.append(q)
+    return seen
+
+
+def _query_compatible(query: str, employer: str) -> bool:
+    q = set(query.split())
+    return bool(q) and q.issubset(set(normalize_name(employer).split()))
 
 
 def _request(
@@ -191,7 +223,12 @@ def registered_subunits(profile: dict[str, Any]) -> set[str]:
 AGGREGATE_TITLE = re.compile(
     r"\b(flere|ulike|diverse|mange|nye)\s+(ledige\s+)?stillinger\b|\bledige\s+stillinger\b|"
     r"\b(talentbank|talent\s*pool|åpen\s+søknad|apen\s+soknad|generell\s+søknad|open\s+application|"
-    r"multiple\s+positions|several\s+positions|various\s+positions|sommerjobb(er)?\s+\d{4}\s*-\s*flere)\b",
+    r"multiple\s+positions|several\s+positions|various\s+positions|sommerjobb(er)?\s+\d{4}\s*-\s*flere)\b|"
+    # an explicit head-count in the title ("2 faste 100%-stillinger", "3 sykepleiere")
+    r"(?<![\d%,.])\b([2-9]|[1-9]\d)\s+(?:nye\s+|faste\s+|midlertidige\s+|ledige\s+)*"
+    r"(?:\d+\s*%-?\s*)?(?:\w+-)?(stillinger|stillingar|vikariater|vikariat|vikarer|vikarar|sykepleiere|sjukepleiarar|medarbeidere|medarbeidarar|lærlinger|lærlingar|lærlingplasser)\b|"
+    # recruitment pools for several people, not one vacancy
+    r"\b(tilkallingsvikarer|tilkallingsvikarar|ringevikarer|ringevikarar|sommervikarer|sommarvikarar|ekstravakter|ekstrahjelper|vikarer|vikarar|vikarpool|vikarbank|helgestillinger|helgestillingar)\b",
     re.I,
 )
 
@@ -237,7 +274,7 @@ def single_current_ad_check(content: dict[str, Any], now: "datetime | None" = No
     title = " ".join(str(content.get("title") or content.get("jobtitle") or "").split())
     if not title:
         return "ad has no title"
-    if AGGREGATE_TITLE.search(title) or re.search(r"\s/\s|;|\bog/eller\b", title) and len(title) > 60:
+    if AGGREGATE_TITLE.search(title):
         return "title indicates an aggregate or multi-role posting"
     return None
 
@@ -265,7 +302,7 @@ def jobs_from_entry(body: Any, org: str, subunits: set[str] | frozenset[str] = f
     return [
         {
             "uuid": uuid,
-            "title": " ".join(str(content.get("title") or content.get("jobtitle") or "").split()),
+            "title": " ".join(re.sub(r"[\ufeff\u200b\u200c\u200d]", "", str(content.get("title") or content.get("jobtitle") or "")).split()),
             "published": content.get("published"),
             "expires": content.get("expires"),
             "application_due": content.get("applicationDue"),
@@ -304,8 +341,30 @@ def fetch_nav_jobs(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
 
     token = get_public_token()
 
-    candidates, search_result = search_job_candidates(name)
-    _add(search_result)
+    queries = search_queries(name)
+    candidates: list[dict[str, Any]] = []
+    search_result = None
+    compatible: list[dict[str, Any]] = []
+    queries_used: list[str] = []
+    for query in queries or [name]:
+        found, result = search_job_candidates(query)
+        _add(result)
+        queries_used.append(query)
+        if search_result is None or (search_result.status != 200 and result.status == 200):
+            search_result = result
+        if result.status != 200:
+            continue
+        candidates.extend(found)
+        for item in found:
+            emp = item.get("employer_name") or ""
+            biz = item.get("business_name") or ""
+            ok = names_compatible(name, emp) or names_compatible(name, biz) or _query_compatible(query, emp) or _query_compatible(query, biz)
+            if ok and item["uuid"] not in {c["uuid"] for c in compatible}:
+                compatible.append(item)
+        if compatible:
+            break
+    compatible = compatible[:MAX_DETAIL_FETCHES]
+    assert search_result is not None
     source_url = search_result.url
     if search_result.status != 200:
         return (
@@ -338,13 +397,6 @@ def fetch_nav_jobs(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
             metrics,
         )
 
-    compatible = [
-        item
-        for item in candidates
-        if names_compatible(name, item.get("employer_name") or "")
-        or names_compatible(name, item.get("business_name") or "")
-    ][:MAX_DETAIL_FETCHES]
-
     subunits = registered_subunits(profile)
     matched: list[dict[str, Any]] = []
     hashes: list[str] = []
@@ -367,8 +419,10 @@ def fetch_nav_jobs(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
     unique: list[dict[str, Any]] = []
     for job in matched:
         uid = str(job.get("uuid") or "")
-        if uid and uid not in seen:
-            seen.add(uid)
+        # Same title, place and deadline under one employer = re-posted copy, not a second vacancy.
+        twin = "|".join(str(job.get(k) or "").casefold() for k in ("title", "municipal", "expires", "employer_orgnr"))
+        if uid and uid not in seen and twin not in seen:
+            seen.update({uid, twin})
             unique.append(job)
 
     combined_hash = hashlib.sha256("".join(hashes).encode()).hexdigest() if hashes else search_result.content_sha256
@@ -376,6 +430,7 @@ def fetch_nav_jobs(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
         "jobs": unique,
         "job_count": len(unique),
         "candidates_considered": len(compatible),
+        "search_queries": queries_used,
         "skipped_unverifiable_feed_entries": skipped_unverifiable,
         "match_rule": "exact_employer_orgnr_on_active_feed_entry (legal entity or Brreg-registered sub-unit)",
         "subunits_checked": len(subunits),

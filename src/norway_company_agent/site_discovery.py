@@ -7,7 +7,13 @@ contact/about pages, and accept a candidate only when
 
   * the page shows this company's organisation number, or
   * every distinctive name token AND the registered postcode or street appear,
-    and the page shows no *other* organisation number (sister-company guard).
+    and the page shows no *other* organisation number (sister-company guard), or
+  * side evidence for sites that never print the org.nr or address (e.g. a small
+    agency's portfolio site): the .no domain IS the full legal-name core (every token,
+    nothing dropped or added), the page names the exact legal entity ("<name> AS") or
+    the registry e-mail domain is this domain, and the page names no other legal
+    entity -- no other labelled org.nr, no different JSON-LD legalName, no
+    "(c) <Other> AS" owner line (parent / brand-owner guard).
 
 Anything else is left undiscovered. Precision first: a wrong website poisons
 every downstream claim.
@@ -73,6 +79,57 @@ def name_and_address_match(html: str, name: str, postcode: str | None, streets: 
     return name_ok and addr_ok
 
 
+LEGAL_SUFFIXES = r"(?:AS|ASA|ANS|DA|SA|BA|NUF|KS|IKS)"
+OWNER_LINE = re.compile(r"(?:©|&copy;|\(c\)|copyright)\s*(?:\d{4}(?:\s*[-–]\s*\d{4})?\s*)?([A-ZÆØÅ0-9][\wÆØÅæøå&.\- ]{1,60}?\s" + LEGAL_SUFFIXES + r")\b", re.I)
+LEGALNAME_JSON = re.compile(r'"legalName"\s*:\s*"([^"]{2,120})"')
+
+
+def _name_tokens(name: str) -> list[str]:
+    return [t for t in re.split(r"[^a-zæøå0-9]+", SUFFIX.sub(" ", name or "").lower()) if t]
+
+
+def _visible_text(html: str) -> str:
+    text = re.sub(r"<(script|style)\b.*?</\1>", " ", html, flags=re.S | re.I)
+    text = re.sub(r"<[^>]+>", " ", text).replace("&nbsp;", " ").replace("&amp;", "&")
+    return " ".join(text.split())
+
+
+def domain_is_full_name(host: str, name: str) -> bool:
+    """The .no domain label is exactly the legal name without suffix (all tokens kept)."""
+    if not host.endswith(".no"):
+        return False
+    label = host.removeprefix("www.")[: -len(".no")]
+    slugs = candidate_slugs(name, limit=2)  # first two are the full-token forms
+    return len(label.replace("-", "")) >= 5 and label in slugs
+
+
+def names_other_legal_entity(html: str, name: str) -> bool:
+    ours = set(_name_tokens(name))
+    owners = [m.group(1) for m in OWNER_LINE.finditer(_visible_text(html))]
+    owners += LEGALNAME_JSON.findall(html)
+    return any(set(_name_tokens(o)) != ours for o in owners if _name_tokens(o))
+
+
+def legal_name_on_page(html: str, name: str) -> bool:
+    tokens = _name_tokens(name)
+    suffix = SUFFIX.findall(name or "")
+    if not tokens or not suffix:
+        return False
+    phrase = r"\s+".join(re.escape(t) for t in tokens) + r"\s+" + re.escape(suffix[-1].lower()) + r"(?![\wæøå])"
+    return bool(re.search(r"(?<![\wæøå])" + phrase, _visible_text(html).lower()))
+
+
+def side_evidence_match(html: str, host: str, name: str, org: str, registry_email: str | None) -> str | None:
+    if not domain_is_full_name(host, name) or shows_other_orgnr(html, org) or names_other_legal_entity(html, name):
+        return None
+    email_domain = (registry_email or "").rpartition("@")[2].lower().strip()
+    if email_domain and email_domain == host.removeprefix("www."):
+        return "domain is the full legal name and matches the registry e-mail domain; no other legal entity named"
+    if legal_name_on_page(html, name):
+        return "domain is the full legal name and the page names the exact legal entity; no other legal entity named"
+    return None
+
+
 def _resolves(host: str) -> bool:
     try:
         socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
@@ -109,6 +166,7 @@ def discover_website(profile: dict[str, Any], *, timeout: float = 6.0, max_bytes
     if str(profile.get("industry_code") or "").startswith(SKIP_INDUSTRY_PREFIXES):
         return None, evidence("website_discovery", "not_found", "domain_candidate_discovery", src, note="Skipped: holding/real-estate shell industry"), metrics
     postcode, streets = _address(profile)
+    registry_email = (((profile.get("evidence") or {}).get("registry_live") or {}).get("value") or {}).get("email")
     pattern = orgnr_pattern(org)
     tried: list[str] = []
     for slug in candidate_slugs(name):
@@ -126,9 +184,12 @@ def discover_website(profile: dict[str, Any], *, timeout: float = 6.0, max_bytes
                 try:
                     final, html, size = _get(url, timeout, max_bytes)
                 except Exception:
-                    if path == "":
+                    if path != "":
+                        continue
+                    try:  # one slower retry: large portfolio homepages time out under load
+                        final, html, size = _get(url, timeout * 2, max_bytes)
+                    except Exception:
                         break  # homepage unreachable: do not probe subpages
-                    continue
                 metrics["bytes"] += size
                 metrics["latencies_ms"].append(int((time.monotonic() - started) * 1000))
                 final_host = (urllib.parse.urlparse(final).hostname or "").lower()
@@ -141,6 +202,10 @@ def discover_website(profile: dict[str, Any], *, timeout: float = 6.0, max_bytes
                     reason = "organisation number shown on " + (path or "homepage")
                 elif name_and_address_match(html, name, postcode, streets, org):
                     reason = "all name tokens plus registered address on " + (path or "homepage") + "; no other organisation number"
+                else:
+                    side = side_evidence_match(html, host, name, org, registry_email)
+                    if side:
+                        reason = side + " (" + (path or "homepage") + ")"
                 if reason:
                     homepage = f"https://{host}/" if path else final
                     return homepage, evidence(
