@@ -18,6 +18,7 @@ def test_jobs_from_entry_requires_exact_orgnr_and_active():
         "ad_content": {
             "uuid": "abc",
             "title": "Kokk",
+                "positioncount": 1,
             "published": "2026-10-17T00:00:00+02:00",
             "expires": "2099-01-01T00:00:00+01:00",
             "link": "https://arbeidsplassen.nav.no/stillinger/stilling/abc",
@@ -34,7 +35,7 @@ def test_jobs_from_entry_requires_exact_orgnr_and_active():
 
 
 def _entry(orgnr):
-    return {"status": "ACTIVE", "ad_content": {"uuid": "u1", "title": "Kokk", "expires": "2099-01-01", "employer": {"name": "X", "orgnr": orgnr}}}
+    return {"status": "ACTIVE", "ad_content": {"uuid": "u1", "title": "Kokk", "expires": "2099-01-01", "positioncount": 1, "employer": {"name": "X", "orgnr": orgnr}}}
 
 
 def test_subunit_orgnr_is_accepted_and_labelled():
@@ -57,7 +58,7 @@ def test_registered_subunits_reads_locations_evidence():
 
 
 def _own(**extra):
-    content = {"uuid": "u2", "title": "Kokk", "expires": "2099-01-01", "employer": {"name": "X", "orgnr": "985589003"}}
+    content = {"uuid": "u2", "title": "Kokk", "expires": "2099-01-01", "positioncount": 1, "employer": {"name": "X", "orgnr": "985589003"}}
     content.update(extra)
     return {"status": "ACTIVE", "ad_content": content}
 

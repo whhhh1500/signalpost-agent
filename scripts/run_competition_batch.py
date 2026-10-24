@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from norway_company_agent.identity import GATE_VERSION  # noqa: E402
 from norway_company_agent.batch import profile_complete_for_modules, profiles_from_bulk, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.evidence import utc_now  # noqa: E402
 from norway_company_agent.identity import apply_website_identity_gate  # noqa: E402
@@ -77,6 +78,15 @@ def main() -> None:
             website_record, website_metrics = fetch_website(profile.get("website"))
             if profile.get("website_origin") == "discovered":
                 website_record["source_type"] = website_record["source_class"] = "discovered_company_website"
+                disc_value = (profile["evidence"].get("website_discovery") or {}).get("value") or {}
+                if website_record.get("status") == "available" and disc_value.get("matched_identity_text_excerpt"):
+                    # Audit item 9: the page that proved identity during discovery (/kontakt etc.)
+                    # is handed to the identity gate as a fetched page of the same site.
+                    website_record.setdefault("value", {}).setdefault("pages", []).append({
+                        "url": disc_value.get("matched_url"),
+                        "identity_text_excerpt": disc_value["matched_identity_text_excerpt"],
+                        "origin": "website_discovery",
+                    })
             for key in ("requests", "bytes"):
                 website_metrics[key] += discovery_metrics[key]
             website_metrics["latencies_ms"] = website_metrics["latencies_ms"] + discovery_metrics["latencies_ms"]
@@ -108,6 +118,7 @@ def main() -> None:
             "latencies_ms": [item.elapsed_ms for item in metrics] + extra_latencies,
         }
         profile["run_metrics"] = metric
+        profile["gate_version"] = GATE_VERSION
         return profile, metric
 
     state: dict[str, dict] = {}

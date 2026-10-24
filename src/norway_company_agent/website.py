@@ -119,10 +119,10 @@ def _social_links(base_url: str, soup: BeautifulSoup) -> list[dict[str, str]]:
             embedded = urllib.parse.parse_qs(parsed_candidate.query).get("href", [])
             if embedded:
                 url = embedded[0]
-        normalized = normalize_social_url(url)
+        normalized = parse_social_account(url)
         if not normalized:
             continue
-        found[(normalized["platform"], normalized["url"])] = normalized
+        found.setdefault((normalized["platform"], normalized["handle"]), {"platform": normalized["platform"], "url": normalized["url"]})
     return sorted(found.values(), key=lambda item: (item["platform"], item["url"]))
 
 
@@ -136,9 +136,9 @@ def structured_social_links(value: Any) -> list[dict[str, str]]:
             for raw in urls:
                 if not isinstance(raw, str):
                     continue
-                normalized = normalize_social_url(raw.strip())
+                normalized = parse_social_account(raw.strip())
                 if normalized:
-                    found[(normalized["platform"], normalized["url"])] = normalized
+                    found.setdefault((normalized["platform"], normalized["handle"]), {"platform": normalized["platform"], "url": normalized["url"]})
             for child in node.values():
                 walk(child)
         elif isinstance(node, list):
@@ -149,49 +149,132 @@ def structured_social_links(value: Any) -> list[dict[str, str]]:
     return sorted(found.values(), key=lambda item: (item["platform"], item["url"]))
 
 
-def normalize_social_url(url: str) -> dict[str, str] | None:
+# Per-platform account-path rules (audit: a social URL is an ACCOUNT only when its path is the
+# platform's account path; content paths such as posts/videos/reels are never accounts).
+_RESERVED_FIRST = {
+    "facebook": {"sharer", "sharer.php", "share.php", "share", "dialog", "policy.php", "privacy", "events", "groups",
+                 "plugins", "people", "pages", "watch", "hashtag", "story.php", "photo.php", "photo", "photos",
+                 "permalink.php", "login", "login.php", "home.php", "marketplace", "gaming", "profile.php", "reel",
+                 "reels", "videos", "video", "posts", "help", "legal", "settings", "notifications", "messages",
+                 "business", "ads", "l.php", "tr", "media", "stories", "search", "fundraisers", "accounts"},
+    "instagram": {"p", "reel", "reels", "stories", "explore", "accounts", "tv", "direct", "about", "developer",
+                  "legal", "web", "challenge", "s", "tags"},
+    "x": {"intent", "share", "home", "search", "i", "hashtag", "explore", "settings", "login", "signup", "messages",
+          "notifications", "compose", "tos", "privacy"},
+    "tiktok": set(),
+    "linkedin": set(),
+    "youtube": {"watch", "shorts", "playlist", "results", "feed", "embed", "live", "hashtag"},
+}
+# Trailing account "tabs" that still denote the account itself; anything else after the handle is content.
+_ACCOUNT_TABS = {
+    "facebook": {"about", "info", "community", "reviews"},
+    "instagram": set(),
+    "x": set(),
+    "tiktok": set(),
+    "linkedin": {"about", "jobs", "life", "people", "posts", "mycompany"},
+    "youtube": {"videos", "featured", "about", "streams", "shorts", "playlists", "community", "channels"},
+}
+_HANDLE_RE = re.compile(r"^[A-Za-z0-9._\-]{1,100}$")
+
+
+def parse_social_account(url: str) -> dict[str, str] | None:
+    """Return {platform, url, handle} for an account URL, or None for anything else.
+
+    `handle` is the case-folded account identifier used for identity checks and
+    de-duplication; it is ALWAYS the platform's account segment, never the last path
+    segment (so facebook.com/someone/posts/brandmaker is rejected, not read as 'brandmaker').
+    """
     try:
-        parsed = urllib.parse.urlparse(url)
+        parsed = urllib.parse.urlparse(str(url or "").strip())
     except ValueError:
         return None
-    host = (parsed.hostname or "").lower().removeprefix("www.")
+    if parsed.scheme not in {"http", "https", ""}:
+        return None
+    host = (parsed.hostname or "").lower().removeprefix("www.").removeprefix("m.").removeprefix("mobile.")
     platform = next((label for domain, label in SOCIAL_HOSTS.items() if host == domain or host.endswith("." + domain)), None)
-    if not platform:
+    if not platform or host == "youtu.be":
         return None
-    parts = [part.strip() for part in parsed.path.split("/") if part.strip()]
+    parts = [part.strip() for part in urllib.parse.unquote(parsed.path).split("/") if part.strip()]
+    if not parts:
+        return None
     lowered = [part.casefold() for part in parts]
-    rejected_first = {
-        "facebook": {"sharer", "sharer.php", "share.php", "dialog", "policy.php", "privacy", "events", "groups", "plugins"},
-        "instagram": {"p", "reel", "reels", "stories", "explore"},
-        "x": {"intent", "share", "home", "search", "i"},
-    }
-    if not parts or lowered[0] in rejected_first.get(platform, set()):
+    if lowered[0] in _RESERVED_FIRST[platform]:
         return None
-    if platform == "facebook" and lowered[0] == "profile.php":
-        return None
-    if platform == "linkedin" and (lowered[0] != "company" or len(parts) < 2):
-        return None
-    if platform == "youtube" and lowered[0] not in {"channel", "user", "c"} and not parts[0].startswith("@"):
-        return None
-    if host == "youtu.be":
-        return None
-    if platform == "tiktok" and not parts[0].startswith("@"):
-        return None
-    if platform == "x" and len(parts) != 1:
+    tabs = _ACCOUNT_TABS[platform]
+    if platform == "linkedin":
+        if lowered[0] != "company" or len(parts) < 2:
+            return None
+        account, rest = parts[:2], lowered[2:]
+        handle = parts[1]
+    elif platform == "youtube":
+        if parts[0].startswith("@"):
+            account, rest, handle = parts[:1], lowered[1:], parts[0][1:]
+        elif lowered[0] in {"channel", "user", "c"} and len(parts) >= 2:
+            account, rest, handle = parts[:2], lowered[2:], parts[1]
+        else:
+            return None
+    elif platform == "tiktok":
+        if not parts[0].startswith("@"):
+            return None
+        account, rest, handle = parts[:1], lowered[1:], parts[0][1:]
+    else:  # facebook, instagram, x: the account is the single first segment
+        account, rest, handle = parts[:1], lowered[1:], parts[0].lstrip("@")
+    if rest and (len(rest) > 1 or rest[0] not in tabs):
+        return None  # content path (post, video, reel, photo, status ...) -- not an account
+    if not handle or not _HANDLE_RE.match(handle) or handle.endswith(".php"):
         return None
     canonical_host = {
-        "linkedin": "linkedin.com",
-        "facebook": "facebook.com",
-        "instagram": "instagram.com",
-        "x": "x.com",
-        "youtube": "youtube.com",
-        "tiktok": "tiktok.com",
+        "linkedin": "linkedin.com", "facebook": "facebook.com", "instagram": "instagram.com",
+        "x": "x.com", "youtube": "youtube.com", "tiktok": "tiktok.com",
     }[platform]
-    if platform == "linkedin":
-        parts = parts[:2]
-    elif platform == "youtube":
-        parts = parts[:1] if parts[0].startswith("@") else parts[:2]
-    return {"platform": platform, "url": f"https://{canonical_host}/{'/'.join(parts)}"}
+    case_sensitive = platform == "youtube" and lowered[0] == "channel"
+    path = "/".join(account)
+    return {"platform": platform, "url": f"https://{canonical_host}/{path}", "handle": handle if case_sensitive else handle.casefold()}
+
+
+def normalize_social_url(url: str) -> dict[str, str] | None:
+    """Public form {platform, url} (original handle casing kept for display)."""
+    parsed = parse_social_account(url)
+    return {"platform": parsed["platform"], "url": parsed["url"]} if parsed else None
+
+
+def dedupe_social_links(links: list[dict[str, str]]) -> list[dict[str, str]]:
+    """De-duplicate by (platform, normalized account handle), not raw URL text."""
+    found: dict[tuple[str, str], dict[str, str]] = {}
+    for item in links:
+        normalized = parse_social_account(item.get("url") or "")
+        if not normalized:
+            continue
+        found.setdefault((normalized["platform"], normalized["handle"]), normalized)
+    found = {key: {"platform": v["platform"], "url": v["url"]} for key, v in found.items()}
+    return sorted(found.values(), key=lambda item: (item["platform"], item["url"]))
+
+
+IDENTITY_SELECTORS = (
+    'footer, address, [itemprop="legalName"], [itemprop="address"], [itemprop="taxID"], [itemprop="vatID"], '
+    '[itemprop="telephone"], [itemprop="email"], [class*="footer"], [id*="footer"], [class*="copyright"]'
+)
+_LEGAL_LINE = re.compile(r"(?:org(?:anisasjons)?\.?\s*-?\s*(?:nr|nummer)|foretaksregisteret|mva|©|copyright)", re.I)
+
+
+def identity_text_excerpt(soup: BeautifulSoup, limit: int = 3000) -> str:
+    """Footer / legal-imprint text (who operates the site); feeds the website identity gate."""
+    chunks: list[str] = []
+    seen: set[str] = set()
+    for node in soup.select(IDENTITY_SELECTORS):
+        text = " ".join(node.get_text(" ", strip=True).split())
+        if text and text not in seen:
+            seen.add(text)
+            chunks.append(text)
+    for string in soup.find_all(string=_LEGAL_LINE):
+        parent = string.parent
+        if parent is None or parent.name in {"script", "style"}:
+            continue
+        text = " ".join(parent.get_text(" ", strip=True).split())[:400]
+        if text and text not in seen:
+            seen.add(text)
+            chunks.append(text)
+    return " ".join(chunks)[:limit]
 
 
 def _priority_links(base_url: str, soup: BeautifulSoup, limit: int = 4) -> list[str]:
@@ -231,13 +314,20 @@ def _fetch_secondary_page(url: str, *, homepage_domain: str, timeout: float, max
         page_html = raw.decode("utf-8", errors="replace")
         page_soup = BeautifulSoup(page_html, "lxml")
         page_text = trafilatura.extract(page_html, url=final_url, include_links=False, include_tables=False, favor_precision=True) or ""
+        try:
+            page_structured = _jsonld_organisations(extruct.extract(page_html, base_url=final_url, syntaxes=["json-ld", "microdata"]))
+        except Exception:
+            page_structured = []
         page = {
             "url": final_url,
             "title": page_soup.title.get_text(" ", strip=True)[:500] if page_soup.title else "",
             "main_text_excerpt": page_text[:5000],
+            "identity_text_excerpt": identity_text_excerpt(page_soup),
+            "structured_organisations": page_structured,
             "content_sha256": __import__("hashlib").sha256(raw).hexdigest(),
         }
-        return page, _social_links(final_url, page_soup), 2, len(raw), elapsed, None
+        page_social = _social_links(final_url, page_soup) + structured_social_links(page_structured)
+        return page, page_social, 2, len(raw), elapsed, None
     except Exception as exc:
         return None, [], 2, 0, int((time.monotonic() - started) * 1000), f"{type(exc).__name__}: {str(exc)[:120]}"
 
@@ -304,13 +394,14 @@ def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_
             "title": title[:500],
             "description": description[:2000],
             "main_text_excerpt": text[:5000],
+            "identity_text_excerpt": identity_text_excerpt(soup),
             "social_links": _social_links(final_url, soup),
             "structured_organisations": _jsonld_organisations(structured),
             "content_sha256": __import__("hashlib").sha256(raw).hexdigest(),
             "extraction_state": _extraction_state(text, soup),
         }
-        pages = [{"url": final_url, "title": title[:500], "main_text_excerpt": text[:5000], "content_sha256": value["content_sha256"]}]
-        social = value["social_links"]
+        pages = [{"url": final_url, "title": title[:500], "main_text_excerpt": text[:5000], "identity_text_excerpt": value["identity_text_excerpt"], "content_sha256": value["content_sha256"]}]
+        social = value["social_links"] + structured_social_links(value["structured_organisations"])
         crawl_errors = []
         requests = 2
         bytes_received = len(raw)
@@ -333,7 +424,7 @@ def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_
             elif page_error:
                 crawl_errors.append({"url": page_url, "error": page_error})
         value["pages"] = pages
-        value["social_links"] = list({(item["platform"], item["url"]): item for item in social}.values())
+        value["social_links"] = dedupe_social_links(social)
         value["crawl_errors"] = crawl_errors
         return evidence("website", "available", "registry_linked_company_website", final_url, value=value, note="Company-controlled claim layer; not an official registry fact", content_sha256=value["content_sha256"]), {"requests": requests, "bytes": bytes_received, "latencies_ms": page_latencies}
     except urllib.error.HTTPError as exc:

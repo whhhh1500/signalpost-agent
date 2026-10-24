@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .evidence import evidence, utc_now
+from .identity import profile_gate_version_current
 from .official import accounting_obligation_assessment
 from .sampling import iter_bulk
 
@@ -160,5 +161,8 @@ def validate_envelopes(envelopes: list[dict[str, Any]], expected_count: int) -> 
 
 
 def profile_complete_for_modules(profile: dict[str, Any], modules: Iterable[str]) -> bool:
+    # Audit item 7: never reuse a profile validated by an older gate version.
+    if not profile_gate_version_current(profile):
+        return False
     records = profile.get("evidence", {})
     return all(module in records and records[module].get("status") != "not_fetched" for module in modules)

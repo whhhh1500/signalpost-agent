@@ -236,11 +236,11 @@ def main() -> None:
     parser.add_argument("--delay", type=float, default=1.0)
     parser.add_argument("--timeout", type=float, default=20.0)
     args = parser.parse_args()
-    handles = [json.loads(line) for line in Path(args.handles).read_text().splitlines() if line.strip()]
+    handles = [json.loads(line) for line in Path(args.handles).read_text(encoding="utf-8").splitlines() if line.strip()]
     linkedin = [item for item in handles if item.get("platform") == "linkedin"]
     profiles = {
         str(item["organisation_number"]): item
-        for item in (json.loads(line) for line in Path(args.profiles).read_text().splitlines() if line.strip())
+        for item in (json.loads(line) for line in Path(args.profiles).read_text(encoding="utf-8").splitlines() if line.strip())
     }
     observations = []
     errors = []

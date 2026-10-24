@@ -743,8 +743,9 @@ class OperationsTests(unittest.TestCase):
         self.assertEqual(evidence_terminal_state({"status": "not_fetched"}), "submission_error")
 
     def test_batch_resume_only_skips_profiles_with_all_terminal_modules(self):
-        complete = {"evidence": {"registry": {"status": "available"}, "website": {"status": "not_found"}}}
-        partial = {"evidence": {"registry": {"status": "available"}, "website": {"status": "not_fetched"}}}
+        from norway_company_agent.identity import GATE_VERSION
+        complete = {"gate_version": GATE_VERSION, "evidence": {"registry": {"status": "available"}, "website": {"status": "not_found"}}}
+        partial = {"gate_version": GATE_VERSION, "evidence": {"registry": {"status": "available"}, "website": {"status": "not_fetched"}}}
         self.assertTrue(profile_complete_for_modules(complete, ["registry", "website"]))
         self.assertFalse(profile_complete_for_modules(partial, ["registry", "website"]))
 
@@ -879,7 +880,7 @@ class WebsiteTests(unittest.TestCase):
 
     def test_social_profiles_canonicalize_www_variants(self):
         self.assertEqual(normalize_social_url("https://www.facebook.com/Example/"), {"platform": "facebook", "url": "https://facebook.com/Example"})
-        self.assertEqual(normalize_social_url("https://linkedin.com/company/example/admin/feed/posts"), {"platform": "linkedin", "url": "https://linkedin.com/company/example"})
+        self.assertEqual(normalize_social_url("https://linkedin.com/company/example/about"), {"platform": "linkedin", "url": "https://linkedin.com/company/example"})
         self.assertEqual(normalize_social_url("https://youtube.com/channel/abc/featured"), {"platform": "youtube", "url": "https://youtube.com/channel/abc"})
         self.assertIsNone(normalize_social_url("https://facebook.com/profile.php"))
         self.assertIsNone(normalize_social_url("https://[object Object]"))
@@ -1082,10 +1083,15 @@ class OfficialNormalizationTests(unittest.TestCase):
         body = [{"regnskapstype": "SELSKAP", "regnskapsperiode": {"fraDato": "2024-04-01", "tilDato": "2024-12-31"}},
                 {"regnskapstype": "SELSKAP", "regnskapsperiode": {"fraDato": "2023-01-01", "tilDato": "2023-12-31"}}]
         value = normalize_financials(body, "2025")
-        self.assertEqual(value["latest"]["period_months"], 9)
+        # Known-stale latest (FY2025 filed, only FY2024 returned) is withheld, not published as latest.
+        self.assertIsNone(value["latest"])
+        self.assertEqual(value["stale_latest"]["period_months"], 9)
         self.assertIsNone(value["comparison"])
-        self.assertIn("different", value["comparison_note"])
         self.assertFalse(value["latest_is_current"])
+        current = normalize_financials(body, "2024")
+        self.assertEqual(current["latest"]["period_months"], 9)
+        self.assertIsNone(current["comparison"])
+        self.assertIn("different", current["comparison_note"])
 
     def test_financial_history_is_sorted_and_links_to_official_pdfs(self):
         record = normalize_financial_history(["2024", "2022", "2024", "invalid"], "923609016")
@@ -1110,7 +1116,7 @@ class ResearchAgentTests(unittest.TestCase):
             "employees": employees,
             "evidence": {
                 "registry": evidence("registry", "available", "official_registry_bulk", "https://example.test/registry", content_sha256="a" * 64),
-                "financials": evidence("financials", "available", "official_annual_accounts", "https://example.test/accounts", value={"records": [{"revenue": revenue, "annual_result": 1}]}, content_sha256="b" * 64),
+                "financials": evidence("financials", "available", "official_annual_accounts", "https://example.test/accounts", value={"records": [{"revenue": revenue, "annual_result": 1}], "latest": {"revenue": revenue, "annual_result": 1}}, content_sha256="b" * 64),
             },
         }
 
@@ -1326,29 +1332,29 @@ class VerifiedSiteSeedTests(unittest.TestCase):
             seeds = root / "seeds.json"
             output = root / "output.jsonl"
             report = root / "report.json"
-            profiles.write_text(json.dumps({"organisation_number": "123456789", "name": "Example AS"}) + "\n")
+            profiles.write_text(json.dumps({"organisation_number": "123456789", "name": "Example AS"}) + "\n", encoding="utf-8")
             seeds.write_text(json.dumps([{
                 "organisation_number": "123456789",
                 "website": "https://example.no/",
                 "proof_url": "https://source.example/proof",
                 "proof": "Exact name and organisation number",
-            }]))
+            }]), encoding="utf-8")
             command = [
                 sys.executable, str(ROOT / "scripts" / "apply_verified_site_seeds.py"),
                 "--profiles", str(profiles), "--seeds", str(seeds),
                 "--output", str(output), "--report", str(report),
             ]
             subprocess.run(command, check=True, capture_output=True, text=True)
-            row = json.loads(output.read_text().strip())
+            row = json.loads(output.read_text(encoding="utf-8").strip())
             self.assertEqual(row["website"], "https://example.no/")
             self.assertEqual(row["website_seed_source"], "independently_verified_exact_entity")
-            self.assertEqual(json.loads(report.read_text())["applied"], 1)
+            self.assertEqual(json.loads(report.read_text(encoding="utf-8"))["applied"], 1)
 
             seeds.write_text(json.dumps([{
                 "organisation_number": "987654321",
                 "website": "https://unknown.no/",
                 "proof_url": "https://source.example/proof",
-            }]))
+            }]), encoding="utf-8")
             failed = subprocess.run(command, capture_output=True, text=True)
             self.assertNotEqual(failed.returncode, 0)
             self.assertIn("unknown organisations", failed.stderr)

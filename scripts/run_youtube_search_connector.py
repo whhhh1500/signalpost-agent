@@ -54,7 +54,7 @@ def main() -> None:
     }
     wanted = None
     if args.organisations:
-        wanted = {line.strip() for line in Path(args.organisations).read_text().splitlines() if line.strip()}
+        wanted = {line.strip() for line in Path(args.organisations).read_text(encoding="utf-8").splitlines() if line.strip()}
     candidates = []
     for profile in read_jsonl(Path(args.profiles)):
         if wanted is not None and str(profile["organisation_number"]) not in wanted:

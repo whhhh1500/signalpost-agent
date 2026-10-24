@@ -305,7 +305,7 @@ def main() -> None:
     parser.add_argument("--report", required=True)
     args = parser.parse_args()
 
-    wanted = [line.strip() for line in Path(args.organisations).read_text().splitlines() if line.strip()]
+    wanted = [line.strip() for line in Path(args.organisations).read_text(encoding="utf-8").splitlines() if line.strip()]
     profiles = {str(row["organisation_number"]): row for row in read_jsonl(Path(args.profiles))}
     raw = [item for source in args.raw_results for item in read_jsonl(Path(source))]
     by_org: dict[str, list[dict]] = defaultdict(list)

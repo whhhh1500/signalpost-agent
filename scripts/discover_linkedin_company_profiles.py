@@ -268,7 +268,7 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument("--fuzzy", action="store_true", help="Also query exact aliases found on verified official websites.")
     args = parser.parse_args()
-    profiles = [json.loads(line) for line in Path(args.profiles).read_text().splitlines() if line.strip()]
+    profiles = [json.loads(line) for line in Path(args.profiles).read_text(encoding="utf-8").splitlines() if line.strip()]
     cache = SnapshotCache(Path(args.cache_dir))
     results = []
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:

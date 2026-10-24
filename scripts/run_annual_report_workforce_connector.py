@@ -214,10 +214,10 @@ def main() -> None:
     parser.add_argument("--ocr-pages", type=int, default=15)
     parser.add_argument("--ocr-dpi", type=int, default=130)
     args = parser.parse_args()
-    wanted = [line.strip() for line in Path(args.organisations).read_text().splitlines() if line.strip()]
+    wanted = [line.strip() for line in Path(args.organisations).read_text(encoding="utf-8").splitlines() if line.strip()]
     profile_map = {
         str(row["organisation_number"]): row
-        for row in (json.loads(line) for line in Path(args.profiles).read_text().splitlines() if line.strip())
+        for row in (json.loads(line) for line in Path(args.profiles).read_text(encoding="utf-8").splitlines() if line.strip())
         if str(row["organisation_number"]) in set(wanted)
     }
     eligible = []

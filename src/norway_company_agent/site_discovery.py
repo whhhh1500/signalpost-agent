@@ -208,9 +208,18 @@ def discover_website(profile: dict[str, Any], *, timeout: float = 6.0, max_bytes
                         reason = side + " (" + (path or "homepage") + ")"
                 if reason:
                     homepage = f"https://{host}/" if path else final
+                    try:
+                        from bs4 import BeautifulSoup
+
+                        from .website import identity_text_excerpt
+
+                        matched_excerpt = identity_text_excerpt(BeautifulSoup(html, "html.parser"))
+                    except Exception:
+                        matched_excerpt = ""
                     return homepage, evidence(
                         "website_discovery", "available", "domain_candidate_discovery", final,
-                        value={"homepage": homepage, "matched_url": final, "reason": reason, "candidates_tried": tried},
+                        value={"homepage": homepage, "matched_url": final, "reason": reason, "candidates_tried": tried,
+                               "matched_identity_text_excerpt": matched_excerpt},
                         content_sha256=hashlib.sha256(html.encode("utf-8", "replace")).hexdigest(),
                         note="Website not in registry; discovered by name-derived domain and verified against registry identifiers",
                     ), metrics

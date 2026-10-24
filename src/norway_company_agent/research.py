@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .identity import website_identity_publishable
+
 
 def _claim(label: str, value: Any, record: dict[str, Any], classification: str) -> dict[str, Any]:
     return {
@@ -41,9 +43,12 @@ def answer_profile(row: dict[str, Any], question: str) -> dict[str, Any]:
     if all_topics or any(term in q for term in financial_terms):
         fin_value = financial.get("value") or {}
         records = fin_value.get("records") or []
-        latest = fin_value.get("latest") or (max(records, key=lambda r: str((r.get("period") or {}).get("tilDato") or "")) if records else None)
+        # Only the gated `latest` is published; never fall back to an arbitrary/stale record.
+        latest = fin_value.get("latest") if isinstance(fin_value.get("latest"), dict) else None
         if fin_value.get("latest_is_current") is False:
             unsupported.append(fin_value.get("latest_gap_note") or "Latest filed accounts not yet available in structured form.")
+        if latest and latest.get("basis") == "group_konsern":
+            facts.append(_claim("Accounts basis", "group (KONSERN) consolidated figures - no own (SELSKAP) accounts returned", financial, "official_annual_account"))
         if latest:
             for label, key in (
                 ("Reporting period", "period"),
@@ -54,8 +59,8 @@ def answer_profile(row: dict[str, Any], question: str) -> dict[str, Any]:
                 ("Debt", "debt"),
             ):
                 if latest.get(key) is not None:
-                    facts.append(_claim(label, latest[key], financial, "official_annual_account"))
-        else:
+                    facts.append(_claim(label + (" (group/KONSERN)" if latest.get("basis") == "group_konsern" and key != "period" else ""), latest[key], financial, "official_annual_account"))
+        elif not records or fin_value.get("latest_is_current") is not False:
             unsupported.append("No normalized annual-account record was returned; missing values are not interpreted as zero.")
 
     roles = evidence.get("roles", {})
@@ -77,7 +82,7 @@ def answer_profile(row: dict[str, Any], question: str) -> dict[str, Any]:
     website = evidence.get("website", {})
     if all_topics or "social" in q:
         value = website.get("value") or {}
-        website_publishable = (value.get("identity_assessment") or {}).get("publishable", True)
+        website_publishable = website_identity_publishable(website)
         if value.get("description") and website_publishable:
             facts.append(_claim("Website description", value["description"], website, "company_reported_claim"))
         for item in (value.get("social_links") or []) if website_publishable else []:
@@ -112,8 +117,8 @@ UNSUPPORTED_SCREEN_TERMS = {
 
 
 def _latest_financial(row: dict[str, Any]) -> dict[str, Any]:
-    records = ((row.get("evidence", {}).get("financials", {}).get("value") or {}).get("records") or [])
-    return records[0] if records else {}
+    latest = (row.get("evidence", {}).get("financials", {}).get("value") or {}).get("latest")
+    return latest if isinstance(latest, dict) else {}
 
 
 def _numeric_operator(phrase: str) -> str:
@@ -202,7 +207,7 @@ def _screen_value(row: dict[str, Any], field: str) -> Any:
         return _latest_financial(row).get(field)
     if field == "website":
         record = row.get("evidence", {}).get("website", {})
-        return record.get("status") == "available" and bool((record.get("value") or {}).get("identity_assessment", {}).get("publishable", True))
+        return record.get("status") == "available" and website_identity_publishable(record)
     if field == "financials":
         return row.get("evidence", {}).get("financials", {}).get("status") == "available"
     if field == "industry":

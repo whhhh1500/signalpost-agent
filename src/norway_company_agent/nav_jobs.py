@@ -32,8 +32,8 @@ PUBLIC_TOKEN_URL = "https://pam-stilling-feed.nav.no/api/publicToken"
 FEED_ENTRY_URL = "https://pam-stilling-feed.nav.no/api/v1/feedentry/{uuid}"
 SEARCH_URL = "https://arbeidsplassen.nav.no/stillinger/api/search"
 SOURCE_TYPE = "nav_arbeidsplassen_jobs"
-MAX_CANDIDATES = 8
-MAX_DETAIL_FETCHES = 5
+MAX_CANDIDATES = 25
+MAX_DETAIL_FETCHES = 15
 SUFFIX = re.compile(r"\b(AS|ASA|ANS|DA|ENK|SA|BA|NUF|KS|IKS|SF|STI|FLI|SAM)\b\.?", re.I)
 
 _token_lock = threading.Lock()
@@ -233,44 +233,72 @@ AGGREGATE_TITLE = re.compile(
 )
 
 
-def _parse_dt(value: Any) -> "datetime | None":
-    from datetime import datetime, timezone
+OSLO_TZ_NAME = "Europe/Oslo"
+
+
+def _oslo_tz():
+    from zoneinfo import ZoneInfo
+
+    return ZoneInfo(OSLO_TZ_NAME)
+
+
+def _parse_dt(value: Any, *, end_of_day: bool = False) -> "datetime | None":
+    """Parse a NAV timestamp to an aware datetime.
+
+    Naive timestamps are NAV local time (Europe/Oslo). A date-only value is a whole day in
+    Oslo: as a deadline (`end_of_day=True`) it means 23:59:59.999999 Oslo time that day.
+    """
+    from datetime import datetime, time
 
     text = str(value or "").strip()
     if not text:
         return None
+    date_only = len(text) == 10
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         try:
             parsed = datetime.strptime(text[:10], "%Y-%m-%d")
+            date_only = True
         except ValueError:
             return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    if date_only and end_of_day:
+        parsed = datetime.combine(parsed.date(), time.max)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=_oslo_tz())
 
 
 def single_current_ad_check(content: dict[str, Any], now: "datetime | None" = None) -> str | None:
-    """Audit item 3: return a rejection reason, or None if this is ONE current ad of its own.
+    """Return a rejection reason, or None if this is ONE current ad of its own.
 
-    Rules: the feed status must be ACTIVE (checked by caller); `expires` (or `applicationDue`
-    when it is a date) must be present and not in the past; `positioncount` must be 1 or
-    absent; the title must not be an aggregate/multi-role/talent-pool posting.
+    Rules (full timestamps, timezone-aware; audit item 6):
+    * `expires` (or a dated `applicationDue`) must exist and be later than now; a date-only
+      deadline lasts until the end of that day in Europe/Oslo;
+    * a dated `applicationDue` that has passed rejects the ad even if `expires` is later;
+    * `published` must not be in the future;
+    * `positioncount` must be present and exactly 1 (missing/0/non-numeric cannot prove a single vacancy);
+    * the title must not be an aggregate/multi-role/talent-pool posting.
     """
     from datetime import datetime, timezone
 
     now = now or datetime.now(timezone.utc)
-    expires = _parse_dt(content.get("expires"))
-    due = _parse_dt(content.get("applicationDue"))
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=_oslo_tz())
+    expires = _parse_dt(content.get("expires"), end_of_day=True)
+    due = _parse_dt(content.get("applicationDue"), end_of_day=True)
     deadline = expires or due
     if deadline is None:
         return "no expiry/application deadline: cannot prove the ad is current"
-    if deadline.date() < now.date():
-        return f"ad expired {deadline.date().isoformat()}"
-    if due is not None and due.date() < now.date():
-        return f"application deadline passed {due.date().isoformat()}"
-    count = str(content.get("positioncount") or "1").strip()
+    if deadline <= now:
+        return f"ad expired {deadline.isoformat()}"
+    if due is not None and due <= now:
+        return f"application deadline passed {due.isoformat()}"
+    published = _parse_dt(content.get("published"))
+    if published is not None and published > now:
+        return f"ad published in the future ({published.isoformat()})"
+    raw_count = content.get("positioncount")
+    count = str(raw_count if raw_count is not None else "").strip()
     if not count.isdigit() or int(count) != 1:
-        return f"ad bundles several positions (positioncount={count})"
+        return f"positioncount is not exactly 1 (positioncount={raw_count!r}); cannot prove a single vacancy"
     title = " ".join(str(content.get("title") or content.get("jobtitle") or "").split())
     if not title:
         return "ad has no title"
@@ -340,12 +368,24 @@ def fetch_nav_jobs(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
         )
 
     token = get_public_token()
+    if token is None:
+        token = get_public_token(force=True)
 
+    subunits = registered_subunits(profile)
     queries = search_queries(name)
-    candidates: list[dict[str, Any]] = []
     search_result = None
     compatible: list[dict[str, Any]] = []
     queries_used: list[str] = []
+    search_errors: list[str] = []
+    matched: list[dict[str, Any]] = []
+    hashes: list[str] = []
+    skipped_unverifiable = 0
+    detail_errors: list[dict[str, Any]] = []
+    detail_ok = 0
+    rejected_ads: list[dict[str, Any]] = []
+    fetched: set[str] = set()
+    # Audit item 10: keep going through the fallback queries until at least one ad is
+    # orgnr-VERIFIED (not merely name-compatible), within a fixed detail-fetch budget.
     for query in queries or [name]:
         found, result = search_job_candidates(query)
         _add(result)
@@ -353,17 +393,36 @@ def fetch_nav_jobs(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
         if search_result is None or (search_result.status != 200 and result.status == 200):
             search_result = result
         if result.status != 200:
+            search_errors.append(f"{query}: {result.error or 'HTTP ' + str(result.status)}")
             continue
-        candidates.extend(found)
+        new_items = []
         for item in found:
             emp = item.get("employer_name") or ""
             biz = item.get("business_name") or ""
             ok = names_compatible(name, emp) or names_compatible(name, biz) or _query_compatible(query, emp) or _query_compatible(query, biz)
             if ok and item["uuid"] not in {c["uuid"] for c in compatible}:
                 compatible.append(item)
-        if compatible:
+                new_items.append(item)
+        if token is None:
+            continue
+        for item in new_items:
+            if len(fetched) >= MAX_DETAIL_FETCHES:
+                break
+            fetched.add(item["uuid"])
+            entry = fetch_feed_entry(item["uuid"], token)
+            _add(entry)
+            if entry.content_sha256:
+                hashes.append(entry.content_sha256)
+            if entry.status == 404:
+                skipped_unverifiable += 1
+                continue
+            if entry.status != 200:
+                detail_errors.append({"uuid": item["uuid"], "status": entry.status, "error": entry.error})
+                continue
+            detail_ok += 1
+            matched.extend(jobs_from_entry(entry.body, org, subunits, rejected=rejected_ads))
+        if matched or len(fetched) >= MAX_DETAIL_FETCHES:
             break
-    compatible = compatible[:MAX_DETAIL_FETCHES]
     assert search_result is not None
     source_url = search_result.url
     if search_result.status != 200:
@@ -380,10 +439,7 @@ def fetch_nav_jobs(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
             ),
             metrics,
         )
-
-    if token is None:
-        token = get_public_token(force=True)
-    if token is None:
+    if token is None and compatible:
         return (
             evidence(
                 "nav_jobs",
@@ -397,32 +453,15 @@ def fetch_nav_jobs(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
             metrics,
         )
 
-    subunits = registered_subunits(profile)
-    matched: list[dict[str, Any]] = []
-    hashes: list[str] = []
-    skipped_unverifiable = 0
-    rejected_ads: list[dict[str, Any]] = []
-    for item in compatible:
-        entry = fetch_feed_entry(item["uuid"], token)
-        _add(entry)
-        if entry.content_sha256:
-            hashes.append(entry.content_sha256)
-        if entry.status == 404:
-            skipped_unverifiable += 1
-            continue
-        if entry.status != 200:
-            continue
-        matched.extend(jobs_from_entry(entry.body, org, subunits, rejected=rejected_ads))
-
     # Dedupe by uuid
     seen: set[str] = set()
     unique: list[dict[str, Any]] = []
     for job in matched:
+        # Audit item 11: one NAV ad UUID = one ad. Two ads with the same title/place/deadline are
+        # distinct vacancies unless they share the UUID.
         uid = str(job.get("uuid") or "")
-        # Same title, place and deadline under one employer = re-posted copy, not a second vacancy.
-        twin = "|".join(str(job.get(k) or "").casefold() for k in ("title", "municipal", "expires", "employer_orgnr"))
-        if uid and uid not in seen and twin not in seen:
-            seen.update({uid, twin})
+        if uid and uid not in seen:
+            seen.add(uid)
             unique.append(job)
 
     combined_hash = hashlib.sha256("".join(hashes).encode()).hexdigest() if hashes else search_result.content_sha256
@@ -430,6 +469,10 @@ def fetch_nav_jobs(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
         "jobs": unique,
         "job_count": len(unique),
         "candidates_considered": len(compatible),
+        "detail_fetches": len(fetched),
+        "detail_fetches_ok": detail_ok,
+        "detail_fetch_errors": detail_errors,
+        "search_errors": search_errors,
         "search_queries": queries_used,
         "skipped_unverifiable_feed_entries": skipped_unverifiable,
         "match_rule": "exact_employer_orgnr_on_active_feed_entry (legal entity or Brreg-registered sub-unit)",
@@ -437,6 +480,8 @@ def fetch_nav_jobs(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
         "rejected_own_ads": rejected_ads,
         "ad_rule": "single current ad: ACTIVE, not expired, positioncount=1, non-aggregate title, canonical NAV ad URL",
     }
+    if detail_errors:
+        value["verification_incomplete"] = True
     if unique:
         return (
             evidence(
@@ -449,6 +494,22 @@ def fetch_nav_jobs(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
                 retrieved_at=search_result.retrieved_at,
                 source_row_key=org,
                 note=f"{len(unique)} active ad(s) with employer.orgnr={org} or one of its registered sub-units",
+            ),
+            metrics,
+        )
+    if detail_errors and not unique:
+        # All verification attempts failed: this is NOT "no jobs".
+        return (
+            evidence(
+                "nav_jobs",
+                "source_error",
+                SOURCE_TYPE,
+                source_url,
+                value={**value, "job_count": None},
+                content_sha256=combined_hash,
+                retrieved_at=search_result.retrieved_at,
+                source_row_key=org,
+                note=f"{len(detail_errors)} NAV feed detail fetch(es) failed ({detail_ok} ok); cannot claim 'no jobs', job count unknown",
             ),
             metrics,
         )

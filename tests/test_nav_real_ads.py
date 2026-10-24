@@ -14,7 +14,7 @@ import pytest
 
 from norway_company_agent.nav_jobs import jobs_from_entry, search_queries
 
-FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "nav_real_ads_2026-10-24.json").read_text())
+FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "nav_real_ads_2026-10-24.json").read_text(encoding="utf-8"))
 NOW = datetime(2026, 10, 24, tzinfo=timezone.utc)
 
 
