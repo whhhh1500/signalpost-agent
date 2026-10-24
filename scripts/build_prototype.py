@@ -5,7 +5,12 @@ import argparse
 import html
 import json
 from collections import defaultdict
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from norway_company_agent.identity import website_identity_publishable  # noqa: E402
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -80,6 +85,22 @@ def qualification_copy(score: dict | None, independent_score: dict | None = None
     )
 
 
+def gated_financial(financial: dict) -> dict:
+    """Only the gate's `latest` is ever exposed as the latest record (frontend reads records[0]).
+    latest=None (stale, unknown type, unresolved conflict, legacy record without the gate) ->
+    no record is shown, with the withheld reason. Group (KONSERN) figures carry their basis."""
+    value = financial.get("value") or {}
+    latest = value.get("latest") if isinstance(value, dict) else None
+    if financial.get("status") != "available" or not isinstance(latest, dict):
+        return {"records": [], "withheldReason": (value or {}).get("latest_withheld_reason") if isinstance(value, dict) else None}
+    return {
+        "records": [latest],
+        "basis": value.get("basis"),
+        "basisNote": value.get("basis_note"),
+        "comparison": value.get("comparison"),
+    }
+
+
 def compact(row: dict, external_observations: list[dict] | None = None) -> dict:
     evidence = row.get("evidence", {})
     financial = evidence.get("financials", {})
@@ -90,13 +111,19 @@ def compact(row: dict, external_observations: list[dict] | None = None) -> dict:
     website_value = dict(website.get("value") or {})
     if website.get("status") == "available" and not website_value.get("title"):
         website_value["title"] = "Company site fetched"
-    identity_assessment = website_value.get("identity_assessment") or {}
-    if website.get("status") == "available" and identity_assessment and not identity_assessment.get("publishable"):
+    # Round-2 audit P0-A: the display layer consumes ONLY gated values. Website claims are shown
+    # only if the CURRENT identity gate assessed and passed them; a missing/old assessment fails
+    # closed (title, description and every social link are withheld).
+    if website.get("status") == "available" and not website_identity_publishable(website):
         website_value["quarantined_title"] = website_value.get("title")
-        website_value["quarantined_description"] = website_value.get("description")
-        website_value["quarantined_social_count"] = len(website_value.get("discovered_social_links") or [])
+        website_value["quarantined_social_count"] = len(website_value.get("discovered_social_links") or website_value.get("social_links") or [])
         website_value["title"] = "Registry-linked site — identity not verified"
         website_value["description"] = "Fetched content is retained as discovered evidence but is not attributed to this legal entity."
+        website_value["social_links"] = []
+        for key in ("discovered_social_links", "social_link_assessments", "pages", "main_text_excerpt", "identity_text_excerpt", "structured_organisations", "js_fallback"):
+            website_value.pop(key, None)
+    elif website.get("status") != "available":
+        website_value["social_links"] = []
     live = evidence.get("registry_live", {})
     accounting = evidence.get("accounting_obligation", {})
     external_observations = external_observations or []
@@ -191,7 +218,7 @@ def compact(row: dict, external_observations: list[dict] | None = None) -> dict:
         "registrySource": evidence.get("registry", {}).get("source_url"),
         "registry": meta(evidence.get("registry", {})),
         "accounting": {**meta(accounting), "value": accounting.get("value") or {}},
-        "financial": {**meta(financial), "records": (financial.get("value") or {}).get("records", [])[:3]},
+        "financial": {**meta(financial), **gated_financial(financial)},
         "financialHistory": {**meta(financial_history), "pdfs": (financial_history.get("value") or {}).get("pdfs", [])},
         "roles": {**meta(roles), "items": (roles.get("value") or {}).get("roles", [])[:30]},
         "locations": {**meta(locations), "items": (locations.get("value") or {}).get("locations", [])[:30]},

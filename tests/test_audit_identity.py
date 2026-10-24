@@ -38,10 +38,23 @@ def test_social_handle_rules():
     assert not assess_social_identity({"name": "Nor AS"}, {"platform": "x", "url": "https://x.com/norwegian"})["publishable"]
 
 
-def test_two_accounts_on_one_platform_publish_neither():
+def test_rejected_candidate_does_not_veto_verified_account():
+    # Round-2 audit P1-E: 'vikorenarkitekterbergen' fails verification (Bergen is not the
+    # registered municipality), so it must not cancel the verified exact-name account.
     p = _profile(identity_text_excerpt="Org.nr 985 589 003", social_links=[
         {"platform": "facebook", "url": "https://facebook.com/vikorenarkitekter"},
         {"platform": "facebook", "url": "https://facebook.com/vikorenarkitekterbergen"},
+        {"platform": "linkedin", "url": "https://linkedin.com/company/vikoren-arkitekter"},
+    ])
+    out = apply_website_identity_gate(p, p["evidence"]["website"])["website"]["value"]["social_links"]
+    assert out == [{"platform": "facebook", "url": "https://facebook.com/vikorenarkitekter"},
+                   {"platform": "linkedin", "url": "https://linkedin.com/company/vikoren-arkitekter"}]
+
+
+def test_two_verified_accounts_on_one_platform_publish_neither():
+    p = _profile(identity_text_excerpt="Org.nr 985 589 003", social_links=[
+        {"platform": "facebook", "url": "https://facebook.com/vikorenarkitekter"},
+        {"platform": "facebook", "url": "https://facebook.com/vikorenarkitekterofficial"},
         {"platform": "linkedin", "url": "https://linkedin.com/company/vikoren-arkitekter"},
     ])
     out = apply_website_identity_gate(p, p["evidence"]["website"])["website"]["value"]["social_links"]

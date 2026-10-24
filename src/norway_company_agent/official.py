@@ -112,6 +112,23 @@ def _period_months(period: Any) -> int | None:
     return None
 
 
+def _same_anniversary(a: Any, b: Any) -> bool:
+    """Same calendar boundary in different years: same month and day, or both the last day of
+    the same month (2025-02-28 and 2024-02-29 are both 'end of February')."""
+    import calendar
+    from datetime import date
+
+    try:
+        x, y = date.fromisoformat(str(a)[:10]), date.fromisoformat(str(b)[:10])
+    except ValueError:
+        return False
+    if x.month != y.month:
+        return False
+    if x.day == y.day:
+        return True
+    return x.day == calendar.monthrange(x.year, x.month)[1] and y.day == calendar.monthrange(y.year, y.month)[1]
+
+
 COMPARABLE_FIELDS = ("revenue", "operating_result", "profit_before_tax", "annual_result", "assets", "equity", "debt")
 OWN_ACCOUNT_TYPE = "SELSKAP"
 GROUP_ACCOUNT_TYPE = "KONSERN"
@@ -177,8 +194,21 @@ def normalize_financials(body: Any, expected_latest_year: Any = None) -> dict[st
         groups.setdefault(key, []).append(record)
     chosen: list[dict[str, Any]] = []
     superseded: list[dict[str, Any]] = []
-    for items in groups.values():
+    conflicts: list[dict[str, Any]] = []
+    for key, items in groups.items():
         items = sorted(items, key=_version_key, reverse=True)
+        if len(items) > 1:
+            top = _version_key(items[0])
+            tied = [r for r in items if _version_key(r) == top]
+            figures = {tuple(r.get(f) for f in COMPARABLE_FIELDS) + (r.get("currency"),) for r in tied}
+            if len(tied) > 1 and len(figures) > 1:
+                # Same type + period, different figures, and no authoritative version signal
+                # (journalnr/id missing or equal): an UNRESOLVED conflict. Never pick by input order.
+                conflicts.append({
+                    "account_type": key[0] or None, "period_start": key[1] or None, "period_end": key[2] or None,
+                    "versions": [{"record_id": r.get("record_id"), "journal_number": r.get("journal_number"), "revenue": r.get("revenue")} for r in tied],
+                })
+                continue
         winner = dict(items[0])
         if len(items) > 1:
             winner["superseded_versions"] = [{"record_id": r.get("record_id"), "journal_number": r.get("journal_number")} for r in items[1:]]
@@ -202,13 +232,26 @@ def normalize_financials(body: Any, expected_latest_year: Any = None) -> dict[st
         "version_rule": "highest journalnr, then highest record id, per (account type, period start, period end)",
         "superseded_record_count": len(superseded),
     }
+    if conflicts:
+        result["unresolved_version_conflicts"] = conflicts
     if not pool:
         result["comparison"] = None
         result["latest_withheld_reason"] = "no account with a known type (SELSKAP or KONSERN); unknown or missing types are not treated as the company's own accounts"
+        if conflicts:
+            result["latest_withheld_reason"] = "unresolved conflict between same-period filings with different figures and no journalnr/id; withheld"
         if unknown:
             result["unknown_type_record_count"] = len(unknown)
         return result
     latest = pool[0]
+    pool_type = str(latest.get("account_type") or "").upper()
+    blocking = [c for c in conflicts if c["account_type"] in {pool_type, OWN_ACCOUNT_TYPE} and (c["period_end"] or "") >= (latest.get("period_end") or "")]
+    if blocking:
+        result["comparison"] = None
+        result["latest_withheld_reason"] = (
+            f"unresolved conflict: several {blocking[0]['account_type']} filings for {blocking[0]['period_start']}..{blocking[0]['period_end']} "
+            "with different figures and no journalnr/id to order them; withheld rather than picking one"
+        )
+        return result
     result["basis"] = latest["basis"]
     if latest["basis"] == "group_konsern":
         result["basis_note"] = "Only group (KONSERN) accounts were returned; figures are consolidated group figures, not the company's own accounts."
@@ -226,7 +269,7 @@ def normalize_financials(body: Any, expected_latest_year: Any = None) -> dict[st
     result["latest"] = latest
     previous = next((r for r in pool[1:] if (r.get("period_end") or "") < (latest.get("period_start") or latest.get("period_end") or "")
                      and r.get("account_type") == latest.get("account_type")), None)
-    same_boundaries = bool(previous) and (latest.get("period_start") or "")[5:] == (previous.get("period_start") or "")[5:] and (latest.get("period_end") or "")[5:] == (previous.get("period_end") or "")[5:]
+    same_boundaries = bool(previous) and _same_anniversary(latest.get("period_start"), previous.get("period_start")) and _same_anniversary(latest.get("period_end"), previous.get("period_end"))
     if previous is None:
         result["comparison"] = None
         result["comparison_note"] = "no earlier period of the same account type"

@@ -8,7 +8,7 @@ from typing import Any
 
 # Bump whenever any publication gate gets stricter: stored profiles validated under an
 # older version are re-validated (never re-published as-is) on --resume.
-GATE_VERSION = "signalpost-gates-v5-2026-10-24"
+GATE_VERSION = "signalpost-gates-v6-2026-10-24"
 
 LEGAL_AND_GENERIC = {
     "as", "asa", "ans", "da", "enk", "iks", "sa", "sam", "sti", "stiftelsen",
@@ -44,6 +44,35 @@ def labelled_orgnrs(text: str) -> set[str]:
     return {re.sub(r"\D", "", match) for match in ORGNR_LABELLED.findall(text or "")}
 
 
+# Wording that introduces OTHER entities (subsidiaries, sister companies, partners, owners):
+# an organisation number listed after it is a mention, not the site operator's own number.
+GROUP_LISTING_CONTEXT = re.compile(
+    r"(?:datter\w*|s\u00f8ster\w*|soster\w*|konsernselskap\w*|selskaper\s+i\s+konsernet|v\u00e5re\s+selskaper|vare\s+selskaper|"
+    r"tilknyttede|subsidiar\w*|sister\s+compan\w*|group\s+compan\w*|our\s+companies|eier\w*\s+av|eies\s+av|owned\s+by|"
+    r"morselskap\w*|parent\s+company|partner\w*|samarbeids\w*|kunde\w*|referanse\w*|leverand\u00f8r\w*|leverandor\w*|"
+    r"forhandler\w*|webdesign|utviklet\s+av|levert\s+av)",
+    re.I,
+)
+
+
+def orgnr_mentions(text: str) -> list[tuple[str, bool]]:
+    """(orgnr, operator_context) for every labelled org.nr. operator_context is False when the
+    number is introduced as some OTHER entity's ("Vare datterselskaper: X AS org.nr ...")."""
+    out = []
+    text = text or ""
+    for match in ORGNR_LABELLED.finditer(text):
+        digits = re.sub(r"\D", "", match.group(1))
+        before = text[max(0, match.start() - 120):match.start()]
+        # Only the clause the number belongs to: cut at the last sentence/line break.
+        clause = re.split(r"[.!?\n\u2022|]\s|\n", before)[-1]
+        out.append((digits, not GROUP_LISTING_CONTEXT.search(clause)))
+    return out
+
+
+def operator_orgnrs(text: str) -> set[str]:
+    return {digits for digits, operator in orgnr_mentions(text) if operator}
+
+
 def _host_domain(url: str) -> str:
     host = (urllib.parse.urlparse(url or "").hostname or "").casefold().removeprefix("www.")
     parts = host.split(".")
@@ -67,6 +96,62 @@ def _same_entity_name(ours: Any, theirs: Any) -> bool:
     return bool(a) and a == b
 
 
+# Credit lines for the agency that BUILT the site ("Webdesign (c) 2026 Pixel Studio AS",
+# "Utviklet av Pixel Studio AS") name the web agency, not the site operator.
+WEB_CREDIT_CONTEXT = re.compile(
+    r"(?:web\s*-?\s*design|webdesign|nettside|hjemmeside|nettsted|design|designet|utvikl\w*|levert|laget|produsert|"
+    r"powered|developed|made|built|website|site|hosting|publisert)(?:\s+(?:av|by|og|and|i|med))?\s*[:\-|\u2013]?\s*$",
+    re.I,
+)
+
+
+def _copyright_holders(text: str) -> list[str]:
+    names = []
+    for match in COPYRIGHT_HOLDER.finditer(text or ""):
+        before = (text or "")[max(0, match.start() - 40):match.start()]
+        if WEB_CREDIT_CONTEXT.search(before):
+            continue
+        names.append(" ".join(match.group(1).split()))
+    return names
+
+
+def _fold(value: Any) -> str:
+    text = str(value or "").translate(str.maketrans({"\u00f8": "o", "\u00d8": "O", "\u00e5": "a", "\u00c5": "A", "\u00e6": "ae", "\u00c6": "AE"}))
+    return unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+
+
+LEGAL_SUFFIX_RE = r"(?:AS|ASA|ANS|DA|SA|NUF|KS|BA)"
+
+
+def extended_entity_names(our_name: Any, texts: list[Any]) -> list[str]:
+    """Names in identity texts that EXTEND our legal name into another entity.
+
+    'Nordic Bygg Service AS' / 'Nordic Bygg Holding' are not 'Nordic Bygg AS': our full name
+    followed by capitalised extra word(s) and a legal suffix, or followed directly by a
+    corporate-structure word (Holding, Gruppen, Eiendom ...). The words must be ATTACHED to our
+    name -- 'Vi leverer for Holding og Eiendom kunder' elsewhere on the page is not a conflict.
+    """
+    core = [t for t in re.findall(r"[a-z0-9]+", _fold(our_name).casefold())]
+    while core and core[-1] in LEGAL_AND_GENERIC:
+        core.pop()
+    if not core:
+        return []
+    name_re = r"\b(?i:" + r"[\s\-&.]+".join(re.escape(t) for t in core) + ")"
+    structure = "|".join(sorted(CORPORATE_STRUCTURE_WORDS, key=len, reverse=True))
+    with_suffix = re.compile(name_re + r"((?:\s+[A-Z][\w\-]*){1,3})\s+" + LEGAL_SUFFIX_RE + r"\b")
+    with_structure = re.compile(name_re + r"\s+(?i:(" + structure + r"))\b")
+    found = []
+    for text in texts:
+        folded = _fold(text)
+        for match in with_suffix.finditer(folded):
+            if all(w.casefold() in LEGAL_AND_GENERIC for w in match.group(1).split()):
+                continue
+            found.append(" ".join(match.group(0).split()))
+        for match in with_structure.finditer(folded):
+            found.append(" ".join(match.group(0).split()))
+    return found
+
+
 def site_operator_names(value: dict[str, Any]) -> list[str]:
     """Names the site itself declares as its operator: JSON-LD legalName and '(c) <X> AS' lines."""
     names: list[str] = []
@@ -79,8 +164,7 @@ def site_operator_names(value: dict[str, Any]) -> list[str]:
             names.append(legal.strip())
     texts = [value.get("identity_text_excerpt") or ""] + [page.get("identity_text_excerpt") or "" for page in value.get("pages") or []]
     for text in texts:
-        for match in COPYRIGHT_HOLDER.findall(text):
-            names.append(" ".join(match.split()))
+        names.extend(_copyright_holders(text))
     out: list[str] = []
     for name in names:
         if name not in out:
@@ -102,11 +186,14 @@ def foreign_entity_signals(profile: dict[str, Any], value: dict[str, Any], candi
     """
     org = re.sub(r"\D", "", str(profile.get("organisation_number") or ""))
     signals: list[str] = []
-    labelled = labelled_orgnrs(candidate_text)
+    labelled = operator_orgnrs(candidate_text)
     if labelled and org not in labelled:
         signals.append(f"site labels other organisation number(s) {sorted(labelled)[:3]} and not {org}")
     operators = site_operator_names(value)
-    if operators and not any(_same_entity_name(profile.get("name"), name) for name in operators):
+    # A sole, operator-context org.nr equal to ours outranks a copyright line (copyright lines
+    # often carry an old trading name); otherwise a different declared operator blocks.
+    sole_own_orgnr = bool(org) and labelled == {org}
+    if operators and not sole_own_orgnr and not any(_same_entity_name(profile.get("name"), name) for name in operators):
         signals.append(f"site declares operator {operators[0][:80]!r}, which is a different legal entity")
     requested = value.get("requested_url") or ""
     final = value.get("final_url") or ""
@@ -155,10 +242,23 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
     is_business_sports_club = bool(re.search(r"(?:^|\s)B\.?\s*I\.?\s*L\.?(?:\s|$)", str(profile.get("name") or ""), re.I))
     foreign = foreign_entity_signals(profile, value, candidate_text)
     labelled_all = labelled_orgnrs(candidate_text)
+    mentions = orgnr_mentions(candidate_text)
+    operator_all = {digits for digits, operator in mentions if operator}
+    ours_listed_only_as_other = bool(org_digits) and org_digits in labelled_all and org_digits not in operator_all
     own_operator = any(_same_entity_name(profile.get("name"), name) for name in site_operator_names(value))
-    our_words = set(_tokens(profile.get("name")))
-    homepage_words = set().union(*homepage_token_sets) if homepage_token_sets else set()
-    structure_word_conflict = bool((homepage_words & CORPORATE_STRUCTURE_WORDS) - our_words) and exact_homepage_name
+    identity_texts = [value.get("title"), value.get("description"), value.get("identity_text_excerpt"), *structured_names, rendered.get("title")]
+    extended = extended_entity_names(profile.get("name"), identity_texts)
+    if extended and not own_operator:
+        # Our exact name standing on its own (followed by its legal suffix or punctuation/end)
+        # is still evidence; an extended name only conflicts when it is ALL the site shows.
+        core_words = [t for t in re.findall(r"[a-z0-9]+", _fold(profile.get("name")).casefold())]
+        while core_words and core_words[-1] in LEGAL_AND_GENERIC:
+            core_words.pop()
+        plain = re.compile(r"\b(?i:" + r"[\s\-&.]+".join(map(re.escape, core_words)) + r")(?:\s+(?i:" + LEGAL_SUFFIX_RE + r"))?\s*(?:$|[|,.:;!?\u2013\u2014()\-]|\s[a-z\u00e6\u00f8\u00e5])") if core_words else None
+        standalone = bool(plain) and any(plain.search(_fold(t)) for t in identity_texts if t)
+        if standalone:
+            extended = []
+    structure_word_conflict = bool(extended)
     if any(marker in normalized_raw for marker in parked_markers):
         score = 0.1
         reasons.append("captured page is a parked, for-sale, or generic hosting placeholder")
@@ -169,21 +269,24 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
     elif is_business_sports_club and "bedriftsidrett" not in normalized_candidate_text and "b i l" not in normalized_candidate_text:
         score = 0.3
         reasons.append("business sports-club entity points to the operating company's site without club evidence")
-    elif org_digits and org_digits in labelled_all and len(labelled_all) > 1 and not own_operator:
+    elif ours_listed_only_as_other and not own_operator:
         score = 0.65
-        reasons.append(f"site lists several organisation numbers {sorted(labelled_all)[:4]}; mentioning ours does not show that we operate the site")
-    elif org_digits and org_digits in labelled_all and structure_word_conflict and not own_operator:
+        reasons.append("our organisation number appears only where the site lists OTHER entities (subsidiaries/sister companies/partners); the site is not shown to be operated by us")
+    elif org_digits and org_digits in operator_all and len(operator_all) > 1 and not own_operator:
         score = 0.65
-        reasons.append("our organisation number is listed, but the site presents itself as a holding/group entity")
-    elif org_digits and org_digits in labelled_all:
+        reasons.append(f"site labels several organisation numbers {sorted(operator_all)[:4]} as its own; ours alone does not show that we operate the site")
+    elif org_digits and operator_all == {org_digits}:
         score = 1.0
-        reasons.append("the site labels our organisation number as its own (only labelled org.nr, or declared operator is this exact legal entity)")
+        reasons.append("the site labels our organisation number as the operator's (only operator-context org.nr)")
+    elif org_digits and org_digits in operator_all and own_operator:
+        score = 1.0
+        reasons.append("the site labels our organisation number and declares this exact legal entity as operator")
     elif org_digits and org_digits in compact_homepage_candidate and not labelled_all and not structure_word_conflict:
         score = 0.95
         reasons.append("our organisation number appears in homepage identity evidence and no other organisation number is labelled")
-    elif structure_word_conflict and not own_operator:
+    elif structure_word_conflict:
         score = 0.65
-        reasons.append("site name adds a holding/group word that is not in our legal name (possible parent site)")
+        reasons.append(f"site names an extended entity {extended[0][:60]!r} (our legal name plus extra words), possibly a different company")
     elif len(core) >= 2 and exact_homepage_name:
         score = 0.95
         reasons.append("all normalized legal-name tokens appear together in homepage identity evidence")
@@ -208,7 +311,7 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
         "matched_tokens": overlap,
         "reasons": reasons,
         "foreign_entity_signals": foreign,
-        "method": "deterministic_name_org_evidence_v4",
+        "method": "deterministic_name_org_evidence_v5",
         "gate_version": GATE_VERSION,
     }
 
@@ -246,12 +349,19 @@ def assess_social_identity(profile: dict[str, Any], link: dict[str, str], websit
 
     core = _tokens(profile.get("name"))
     normalized = parse_social_account(link.get("url") or "")
-    base = {**link, "matched_tokens": [], "method": "deterministic_social_handle_identity_v3", "gate_version": GATE_VERSION}
+    base = {**link, "matched_tokens": [], "method": "deterministic_social_handle_identity_v4", "gate_version": GATE_VERSION}
     if not normalized:
         return {**base, "identity_score": 0.0, "publishable": False, "reason": "URL is not an account path on this platform (content/post/video/reserved path)"}
     handle = normalized["handle"]
-    handle_tokens = _tokens(handle)
-    handle_compact = "".join(handle_tokens)
+    # Compare the WHOLE handle: no word is dropped ('the.brandmaker', 'brandmaker.and',
+    # 'brandmaker.x', 'brandmaker.1' must keep 'the'/'and'/'x'/'1'); only separators go.
+    handle_compact = "".join(re.findall(r"[a-z0-9]+", _fold(handle).casefold()))
+    # Legal name: drop only the trailing legal-form suffix; inner words like 'og'/'and' stay
+    # (accept both spellings: 'hansenogsonn' and 'hansensonn').
+    name_words = re.findall(r"[a-z0-9]+", _fold(profile.get("name")).casefold())
+    while name_words and name_words[-1] in LEGAL_AND_GENERIC - {"the", "og", "and"}:
+        name_words.pop()
+    core_variants = {v for v in ("".join(name_words), "".join(core)) if v}
     core_compact = "".join(core)
     matched = [token for token in core if token in handle_compact]
     location = set(_tokens(profile.get("municipality")))
@@ -259,10 +369,10 @@ def assess_social_identity(profile: dict[str, Any], link: dict[str, str], websit
     reason = "social handle lacks strong exact-entity name evidence"
     if not handle_compact or handle_compact in GENERIC_HANDLES:
         reason = "generic or empty social handle"
-    elif core_compact and len(core_compact) >= 3 and handle_compact == core_compact:
+    elif any(len(v) >= 3 and handle_compact == v for v in core_variants):
         score = 0.98
         reason = "handle is exactly the normalized legal name"
-    elif core_compact and len(core_compact) >= 3 and handle_compact.startswith(core_compact) and _neutral_remainder(handle_compact[len(core_compact):], location):
+    elif any(len(v) >= 3 and handle_compact.startswith(v) and _neutral_remainder(handle_compact[len(v):], location) for v in core_variants):
         score = 0.95
         reason = "handle is the normalized legal name followed only by neutral words or the registered municipality"
     elif matched:
@@ -291,8 +401,9 @@ def apply_website_identity_gate(profile: dict[str, Any], website: dict[str, Any]
     value["social_link_assessments"] = social_assessments
     # One account per platform: two distinct verified handles on one platform means we
     # cannot tell which is the company's own (e.g. parent vs local), so publish neither.
-    # Candidates carrying the company name (verified or not) compete for "the" account.
-    name_bearing = [item for item in social_assessments if assessment["publishable"] and (item["publishable"] or (item.get("matched_tokens") and item.get("handle", "").startswith("".join(_tokens(profile.get("name"))))))]
+    # Only candidates that PASSED verification compete; a rejected one ('brandmakerfan') must
+    # not veto the verified account ('brandmaker').
+    name_bearing = [item for item in social_assessments if assessment["publishable"] and item["publishable"]]
     per_platform: dict[str, list[dict[str, Any]]] = {}
     for item in name_bearing:
         per_platform.setdefault(item["platform"], []).append(item)

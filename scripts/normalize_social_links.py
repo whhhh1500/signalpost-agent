@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from norway_company_agent.website import normalize_social_url, structured_social_links  # noqa: E402
-from norway_company_agent.identity import assess_social_identity  # noqa: E402
+from norway_company_agent.identity import apply_website_identity_gate  # noqa: E402
 
 
 def main() -> None:
@@ -27,13 +27,14 @@ def main() -> None:
         before += len(links)
         normalized = [item for item in (normalize_social_url(link.get("url", "")) for link in links) if item]
         value["discovered_social_links"] = list({(item["platform"], item["url"]): item for item in normalized}.values())
-        publishable = value.get("identity_assessment", {}).get("publishable", True)
-        assessments = [assess_social_identity(row, link) for link in value["discovered_social_links"]]
-        value["social_link_assessments"] = assessments
-        value["social_links"] = [
-            {"platform": item["platform"], "url": item["url"]}
-            for item in assessments if publishable and item["publishable"]
-        ]
+        # Round-2 audit P2-J: no second policy. Re-run the one publication gate (current gate
+        # version, website identity, per-platform ambiguity); a missing website fails closed.
+        website = row.get("evidence", {}).get("website") or {}
+        if website.get("status") == "available":
+            website["value"] = value
+            apply_website_identity_gate(row, website)
+        else:
+            value["social_links"] = []
         after += len(value["discovered_social_links"])
     temporary = path.with_suffix(path.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8") as handle:

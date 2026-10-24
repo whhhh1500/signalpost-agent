@@ -165,4 +165,44 @@ def profile_complete_for_modules(profile: dict[str, Any], modules: Iterable[str]
     if not profile_gate_version_current(profile):
         return False
     records = profile.get("evidence", {})
-    return all(module in records and records[module].get("status") != "not_fetched" for module in modules)
+    modules = list(modules)
+    if not all(module in records and records[module].get("status") != "not_fetched" for module in modules):
+        return False
+    # Round-2 audit P1-F: freshness is separate from the gate version. Time-sensitive claims
+    # are re-checked on every reuse; a stale one forces a refetch instead of a re-publish.
+    return not time_sensitive_staleness(profile, modules)
+
+
+NAV_JOBS_MAX_AGE_HOURS = 24
+
+
+def time_sensitive_staleness(profile: dict[str, Any], modules: Iterable[str], now: Any = None) -> list[str]:
+    """Reasons a stored profile's time-sensitive claims can no longer be published as-is."""
+    from datetime import datetime, timedelta, timezone
+
+    from .nav_jobs import _parse_dt
+
+    now = now or datetime.now(timezone.utc)
+    records = profile.get("evidence", {})
+    modules = set(modules)
+    reasons: list[str] = []
+    nav = records.get("nav_jobs") or {}
+    if "nav_jobs" in modules and nav.get("status") in {"available", "not_found"}:
+        retrieved = _parse_dt(nav.get("retrieved_at"))
+        if retrieved is None or now - retrieved > timedelta(hours=NAV_JOBS_MAX_AGE_HOURS):
+            reasons.append("nav_jobs snapshot older than %dh (ads may have closed or opened)" % NAV_JOBS_MAX_AGE_HOURS)
+        for job in (nav.get("value") or {}).get("jobs") or []:
+            expires = _parse_dt(job.get("expires"), end_of_day=True)
+            due = _parse_dt(job.get("application_due"), end_of_day=True)
+            deadlines = [d for d in (expires, due) if d is not None]
+            if not deadlines or min(deadlines) <= now:
+                reasons.append(f"nav ad {job.get('uuid')} has expired or has no deadline")
+    fin = records.get("financials") or {}
+    if "financials" in modules and fin.get("status") == "available":
+        value = fin.get("value") or {}
+        latest = value.get("latest") or {}
+        expected = str(profile.get("latest_submitted_accounts") or "").strip()
+        have = str(latest.get("fiscal_year") or "")
+        if expected.isdigit() and (not have.isdigit() or have < expected):
+            reasons.append(f"financials stored for FY{have or '?'} but registry lists FY{expected}")
+    return reasons

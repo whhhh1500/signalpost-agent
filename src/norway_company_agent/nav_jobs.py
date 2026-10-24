@@ -480,8 +480,21 @@ def fetch_nav_jobs(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
         "rejected_own_ads": rejected_ads,
         "ad_rule": "single current ad: ACTIVE, not expired, positioncount=1, non-aggregate title, canonical NAV ad URL",
     }
-    if detail_errors:
+    # Round-2 audit P1-G: "verified ads found" is not "complete count". The count is complete
+    # only if every query ran successfully, every name-compatible candidate was detail-checked,
+    # and no detail fetch failed. Otherwise the count is unknown -- never an asserted 0.
+    unchecked = [c["uuid"] for c in compatible if c["uuid"] not in fetched]
+    count_complete = not search_errors and not unchecked and not detail_errors
+    value["verified_ad_count"] = len(unique)
+    value["unchecked_candidates"] = len(unchecked)
+    value["count_complete"] = count_complete
+    if not count_complete:
         value["verification_incomplete"] = True
+        value["job_count"] = None
+        value["job_count_note"] = (
+            f"{len(unique)} ad(s) verified; count incomplete ({len(search_errors)} failed search(es), "
+            f"{len(unchecked)} unchecked candidate(s), {len(detail_errors)} failed detail fetch(es))"
+        )
     if unique:
         return (
             evidence(
@@ -497,7 +510,7 @@ def fetch_nav_jobs(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
             ),
             metrics,
         )
-    if detail_errors and not unique:
+    if not count_complete and not unique:
         # All verification attempts failed: this is NOT "no jobs".
         return (
             evidence(
@@ -509,7 +522,7 @@ def fetch_nav_jobs(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
                 content_sha256=combined_hash,
                 retrieved_at=search_result.retrieved_at,
                 source_row_key=org,
-                note=f"{len(detail_errors)} NAV feed detail fetch(es) failed ({detail_ok} ok); cannot claim 'no jobs', job count unknown",
+                note=value["job_count_note"] + "; cannot claim 'no jobs', job count unknown",
             ),
             metrics,
         )
