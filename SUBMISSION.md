@@ -79,3 +79,30 @@ returns 198.18.0.0/15 proxy addresses; it is off by default and not needed for e
 - **Jobs validated on real NAV ads**: 45 Norwegian employers with live ads (8 to 8,000+ employees; municipalities, hospitals, staffing, retail, small cafés). 62 ads published: all live-checked ACTIVE, positioncount=1, and employer orgnr confirmed in Brreg as the company or its underenhet. All 43 rejected ads were justified (multi-position, recruitment pool/tilkallingsvikarer incl. nynorsk, or deadline passed). Locked in as `tests/fixtures/nav_real_ads_2026-10-24.json` + `tests/test_nav_real_ads.py`. Search now drops the legal suffix and falls back to short name queries; the crude slash rule (which rejected "Servicetekniker / montør") was replaced by head-count and pool-word rules; identical re-posts are collapsed.
 - **Website side evidence** for sites that never print org.nr: the `.no` domain must be the full legal-name core, the page must name the exact legal entity (or the Brreg e-mail domain matches), and the page must name no other legal entity (other org.nr, JSON-LD legalName, "© Other AS"). Homepage fetch gets one slower retry. 100-company smoke rerun: publishable websites 6 -> 7 (only BRANDMAKER AS, brandmaker.no, added); no other change.
 - Full suite: 241 passed, 5 subtests passed.
+
+
+## Audit checklist response (Soham 2026-10-23)
+
+Recorded version at audit time: `fe23684` (v2/5). Hardening since then is on `main` at
+`563ce4e8e9ec22cd8f8cf0eef4b2ebaa854a03c2` (gate version `signalpost-gates-v6-2026-10-24`).
+Regression suite: `tests/test_audit_*.py`, `tests/test_nav_real_ads.py` — 286 passed.
+
+1. **Own website, not parent/brand** — `assess_website_identity` / `apply_website_identity_gate`
+   only publish a site when operator-bound orgnr or strict legal-name + address evidence
+   points to *this* entity. Parent/sister/brand operator signals, cross-domain redirects
+   without our orgnr, and ambiguous multi-entity pages fail closed (website withheld;
+   social/news/jobs that depended on that site are not published for the subsidiary).
+2. **Own social accounts** — `assess_social_identity` requires whole-handle legal-name match
+   against the company (not a parent, agency, or theme slug). Footer links that fail the
+   gate are dropped; shared/ambiguous candidates are not published.
+3. **Single current job ads** — `nav_jobs.single_current_ad_check` keeps only ACTIVE,
+   non-expired ads with `positioncount=1`, a canonical NAV ad URL (not careers/search
+   landings), and `employer.orgnr` equal to the legal entity or a Brreg-registered
+   underenhet. Aggregate/pool titles and parent vacancies are rejected.
+4. **Latest accounts, equal periods** — `normalize_financials` picks the newest own
+   (`SELSKAP`) filing as `latest` (withhold when FY expected is missing/conflicted);
+   comparisons require the same whole-month period length, same start month/day, and
+   same currency, older → newer. Same-period version conflicts without journalnr/id
+   are withheld. Prototype display is fail-closed on ungated/legacy financials.
+
+Payout note received: cash prizes via Wise (any Wise-supported country/currency).
