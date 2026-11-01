@@ -106,3 +106,27 @@ Regression suite: `tests/test_audit_*.py`, `tests/test_nav_real_ads.py` — 286 
    are withheld. Prototype display is fail-closed on ungated/legacy financials.
 
 Payout note received: cash prizes via Wise (any Wise-supported country/currency).
+
+## Revision: midterm feedback — discover + search UI (2026-11-01)
+
+Addresses Soham midterm notes (website/social/news of our own; blank beats wrong; searchable page):
+
+1. **Website / social discovery** — registry e-mail domain is tried before name-derived hosts; acceptance rules unchanged (org.nr on page, or name+address, or side evidence). Social links still published only from a gate-passed company website with whole-handle legal-name match.
+2. **News** — new `news` module in the competition path: Google News RSS items whose title contains the exact legal name, plus news/press paths already fetched from a publishable company site. No article-body scrape. Prefer blank over a partial brand match.
+3. **Jobs** — same NAV orgnr / underenhet verification as before (blank when none).
+4. **Search UI** — `scripts/serve_company_search.py` resolves by organisation number or legal name (Brreg), enriches live, and shows facts with source URL/status/time. Ambiguous name matches list candidates instead of auto-picking. CLI twin: `scripts/lookup_company.py`.
+
+Shared enrichment: `src/norway_company_agent/enrich.py` (batch + UI). Resolve: `src/norway_company_agent/resolve.py`.
+
+Run UI: `uv run python scripts/serve_company_search.py --port 8765`
+
+Models/APIs: still none paid (Google News RSS is public discovery-only titles). Expected batch cost: USD 0.
+
+Live checks (2026-11-01, box with `SIGNALPOST_ALLOW_FAKE_IP_DNS=1`):
+- BRANDMAKER AS `983107081` → discovered `brandmaker.no`, identity publishable
+- EQUINOR ASA `923609016` → `equinor.com`, 4 socials (FB/IG/LinkedIn/X), 8 exact-title news
+- COLLICARE LOGISTICS AS `980953343` → `collicare.no`, 3 socials, 2 orgnr-verified NAV jobs
+- QUE PASA AS `935667410` → website blank, 2 verified jobs
+- APPELX AS `914561302` → registry/studio site not publishable (identity gate; blank)
+- Ambiguous name `Holding` → candidate list, no auto-pick
+- Suite: `uv run --with pytest pytest -q` → 290 passed, 5 subtests passed

@@ -60,6 +60,26 @@ def candidate_slugs(name: str, limit: int = 6) -> list[str]:
     return seen[:limit]
 
 
+
+
+def email_domain_hosts(registry_email: str | None) -> list[str]:
+    """Prefer the registry e-mail domain as a website candidate (still verified on-page)."""
+    domain = (registry_email or "").rpartition("@")[2].lower().strip().removeprefix("www.")
+    if not domain or "." not in domain:
+        return []
+    free = {
+        "gmail.com", "googlemail.com", "hotmail.com", "outlook.com", "yahoo.com", "icloud.com",
+        "live.com", "msn.com", "online.no", "online.com", "mail.com", "proton.me", "protonmail.com",
+    }
+    if domain in free or any(domain.endswith("." + item) for item in free):
+        return []
+    # Skip free/mail-only providers; keep corporate domains only.
+    label = domain.split(".")[0]
+    if label in {"mail", "email", "smtp", "mx"} or len(label) < 2:
+        return []
+    return [domain]
+
+
 def orgnr_pattern(org: str) -> re.Pattern[str]:
     return re.compile(r"(?<!\d)" + r"[\s\u00a0.\-]?".join(org) + r"(?!\d)")
 
@@ -169,9 +189,16 @@ def discover_website(profile: dict[str, Any], *, timeout: float = 6.0, max_bytes
     registry_email = (((profile.get("evidence") or {}).get("registry_live") or {}).get("value") or {}).get("email")
     pattern = orgnr_pattern(org)
     tried: list[str] = []
+    hosts: list[str] = []
+    for host in email_domain_hosts(registry_email):
+        if host not in hosts:
+            hosts.append(host)
     for slug in candidate_slugs(name):
         for tld in (".no", ".com"):
             host = slug + tld
+            if host not in hosts:
+                hosts.append(host)
+    for host in hosts:
             if len(tried) >= max_hosts:
                 break
             tried.append(host)

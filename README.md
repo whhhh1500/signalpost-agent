@@ -1,3 +1,39 @@
+# Signalpost agent (whhhh1500)
+
+Norwegian company research agent for the Builderr Signalpost challenge.
+
+## What this fork adds
+
+- **Verified website discovery** when Brreg has no homepage (name-derived `.no`/`.com`, registry e-mail domain first; keep only if the page shows this org.nr or strict name+address / side evidence).
+- **Social pages** only from a publishable company website with whole-handle legal-name match.
+- **News**: exact legal-name Google News RSS titles + news/press pages from a verified company site. Blank beats a wrong match.
+- **NAV jobs** orgnr-verified (legal entity or Brreg underenhet); **Brreg kunngjøringer**.
+- **Simple search page**: resolve by company name or organisation number and show facts with sources.
+
+```bash
+uv sync
+# Batch (evaluator contract)
+uv run python scripts/run_competition_batch.py \
+  --organisations smoke-companies.jsonl --bulk brreg-enheter.csv \
+  --profiles-output out/profiles.jsonl --output out/envelopes.jsonl \
+  --report out/report.json --run-id local-001 --workers 4
+
+# One company (CLI summary)
+SIGNALPOST_ALLOW_FAKE_IP_DNS=1 uv run python scripts/lookup_company.py 982942942
+
+# Local search UI
+SIGNALPOST_ALLOW_FAKE_IP_DNS=1 uv run python scripts/serve_company_search.py --port 8765
+# open http://127.0.0.1:8765/
+
+uv run --with pytest pytest -q
+```
+
+`SIGNALPOST_ALLOW_FAKE_IP_DNS=1` is for sandboxes whose DNS returns `198.18.0.0/15` only; leave it unset for normal networks / evaluation.
+
+Details and audit notes: `SUBMISSION.md`.
+
+---
+
 # Signalpost reference agent
 
 This is a runnable starting point for the Signalpost company-research challenge. It is intentionally a solid baseline, not a winning submission.
